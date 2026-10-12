@@ -1,0 +1,15 @@
+
+**/__pycache__/
+
+
+
+# files
+*.yaml
+*.txt
+
+## temp files
+*.log
+test_main.py
+system_prompt.py
+
+
