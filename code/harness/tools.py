@@ -132,27 +132,25 @@ TOOLS_FOR_RESEARCH_SUBAGENT = [
 # research tool
 from harness.tools_research import Research
 
-def initialize_research_tool(model): # main에 있는 model 변수 때문에 순환의존성 걸리는 걸 피하기 위해, 동적으로 함수를 생성해서 반환.
 
-
-    @tool(name="research", description="""
-    Order agent leader to research a topic and returns a summary of the findings.
-    Only thing you need to do is to offer a concrete, detailed and clear research query... and just wait for the result.
-    """)
-    def research(query: str) -> str:
-        try:
-            logger.debug(f"research tool called with query=`{query}`.")
-            research_instance = Research(model = model, query=query)
-            research_instance.run_research()
-            result = research_instance.research_state.get_report(save_log=True)
-            logger.debug(f"{result}")
-        except Exception as e:
-            logger.debug(f"Error in research tool: {e}")
-            result = f"Error in research tool: {str(e)}"
-        return result
+@tool(name="research", description="""
+Order agent leader to research a topic and returns a summary of the findings.
+Only thing you need to do is to offer a concrete, detailed and clear research query... and just wait for the result.
+""")
+def research(query: str) -> str:
+    try:
+        logger.debug(f"research tool called with query=`{query}`.")
+        research_instance = Research(query=query)
+        research_instance.run_research()
+        result = research_instance.research_state.get_report(save_log=True)
+        logger.debug(f"{result}")
+    except Exception as e:
+        logger.debug(f"Error in research tool: {e}")
+        result = f"Error in research tool: {str(e)}"
+    return result
 
     
-    return research
+
 # ------------------------------------------------
 # Tool List
 # ------------------------------------------------
@@ -165,11 +163,22 @@ BASE_TOOLS = [
     web_read,
 ]
 
-def initialize_tools_for_main(model):
-    return BASE_TOOLS + [
-        initialize_research_tool(model=model)
-    ]
 
+def get_tools(role: str):
+    match role:
+
+        # Main agent
+        case "main_agent":
+            return BASE_TOOLS + [ research ]
+
+        # Research agents
+        case "research_planner":
+            return []
+        case "research_worker":
+            return []
+
+        case _:
+            raise ValueError(f"Unknown role: {role}")
 
 # -------------------------------------------------
 # Tool Implementations
@@ -318,3 +327,7 @@ def _web_read(filename: str, line_start: int, line_count: int) -> str:
     result = "".join(f"{i}: {line}" for i, line in enumerate(lines[start:end], start=line_start)) # 
     logger.debug(f"result: {result}")
     return result
+
+
+
+

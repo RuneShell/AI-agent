@@ -1,0 +1,20 @@
+[project]
+name = "agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Hleej", email = "107308917+RuneShell@users.noreply.github.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "psycopg[binary]>=3.3.6",
+    "strands-agents>=1.60.0",
+]
+
+[project.scripts]
+agent = "agent:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"

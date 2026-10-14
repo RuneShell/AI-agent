@@ -7,9 +7,15 @@
 *.yaml
 *.txt
 
-## temp files
+## temp / local files
 *.log
+test1.py
+test2.py
 test_main.py
+
 system_prompt.py
+workspace.md
+
+
 
 
