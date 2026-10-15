@@ -47,7 +47,7 @@ class Engine:
             model = self.model,
             session_manager = get_memory_session_manager(session_id="main_session"),
             system_prompt = SYSTEM_PROMPT,
-            tools = get_tools("main_agent"),
+            tools = get_tools("main_agent", model=self.model), # model → Dependency Injection → tools.
             # callback_handler = None,
         )
 

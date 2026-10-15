@@ -1,7 +1,6 @@
 # built-in
 from datetime import datetime
 import subprocess
-import requests
 import re
 
 # 3rd-party
@@ -10,8 +9,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # custom
-from myLogger import Logger
+from harness.engine import Engine
 from configs import MAX_TOOL_OUTPUT_LENGTH
+
+from myLogger import Logger
 
 logger = Logger(log_dir="./logs", runner_name="tool-usage", console=False, file=True, discord=False)
 
@@ -20,6 +21,7 @@ logger = Logger(log_dir="./logs", runner_name="tool-usage", console=False, file=
 # -------------------------------------------------
 # Tools
 # -------------------------------------------------
+
 
 
 @tool(name="clock", description="What datetime is it now?")
@@ -130,25 +132,23 @@ TOOLS_FOR_RESEARCH_SUBAGENT = [
 ]
 
 # research tool
-from harness.tools_research import Research
+from harness.tool_research import Research
 
 
-@tool(name="research", description="""
-Order agent leader to research a topic and returns a summary of the findings.
-Only thing you need to do is to offer a concrete, detailed and clear research query... and just wait for the result.
-""")
-def research(query: str) -> str:
-    try:
+def create_research_tool(model):
+
+    @tool(name="research", description="""
+    Order agent leader to research a topic and returns a summary of the findings.
+    Only thing you need to do is to offer a concrete, detailed and clear research query... and just wait for the result.
+    """)
+    def research(query: str) -> str:
         logger.debug(f"research tool called with query=`{query}`.")
-        research_instance = Research(query=query)
-        research_instance.run_research()
-        result = research_instance.research_state.get_report(save_log=True)
-        logger.debug(f"{result}")
-    except Exception as e:
-        logger.debug(f"Error in research tool: {e}")
-        result = f"Error in research tool: {str(e)}"
-    return result
+        research_instance = Research(query=query, model=model)
+        research_instance.Run()
+        report = research_instance.research_state.get_report(save_log=True)
+        return report
 
+    return research
     
 
 # ------------------------------------------------
@@ -164,12 +164,14 @@ BASE_TOOLS = [
 ]
 
 
-def get_tools(role: str):
+def get_tools(role: str, model = None):
     match role:
 
         # Main agent
         case "main_agent":
-            return BASE_TOOLS + [ research ]
+            if model is None:
+                raise ValueError("Main agent requires a model.")
+            return BASE_TOOLS + [ create_research_tool(model) ]
 
         # Research agents
         case "research_planner":

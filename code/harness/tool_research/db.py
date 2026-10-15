@@ -21,12 +21,15 @@ class ResearchDB:
         self.tables = self.get_table_names() # restore prev session tables
         print(self.tables) # TODO : logger
 
-    def execute_query(self, query: str, params: tuple = None): # TODO : 이거 아래에 많이 적용
+    def execute_query(self, query: str, params: tuple = None, num_result: int = -1): # TODO : 이거 아래에 많이 적용
         with self.conn.cursor() as cur:
             cur.execute(query, params)
 
             if cur.description:  # SELECT 쿼리인 경우
-                return cur.fetchall() # 결과 반환
+                if num_result > 0:
+                    return cur.fetchmany(num_result)
+                else:
+                    return cur.fetchall() # 모든 결과
             else:  # INSERT, UPDATE, DELETE 쿼리인 경우
                 self.conn.commit()
                 return None
@@ -151,3 +154,54 @@ class ResearchDB:
         """, (TID, goal))
 
         return records[0] # return new goal's ID (GID)
+
+
+    def get_task_report(self, TID: int) -> str:
+        if 'goals' not in self.tables:
+            return ""
+
+        return "" # TODO : ...
+
+
+
+    ##== 3. Intents ==
+
+    def init_table_intents(self):
+        if 'intents' in self.tables:
+            return
+        self.tables.append('intents')
+
+        # create ENUM : intent_status
+        self.execute_query("""
+            CREATE TYPE intent_status AS ENUM(
+                'PENDING',
+                'WORKING',
+                'FAILED',
+                'TIMEOUT',
+                'DONE',
+                'APPROVED',
+                'DISCARDED'
+            );""")
+
+        # create table : intents
+        self.execute_query("""
+            CREATE TABLE intents (
+                IID SERIAL PRIMARY KEY,
+                TID INT REFERENCES tasks(TID) ON DELETE CASCADE,
+                GID INT REFERENCES goals(GID) ON DELETE CASCADE,
+                intent TEXT NOT NULL,
+                status intent_status NOT NULL DEFAULT 'PENDING'
+            );""")
+
+    def get_intents(self, TID: int, GID: int, num_result: int = 4) -> list[str]:
+        if 'intents' not in self.tables:
+            return []
+
+        # FAILED나 TIMEOUT은 검수 후에 다시 PENDING으로 되돌려짐.
+        records = self.execute_query("""
+            SELECT intent
+            FROM intents
+            WHERE TID = %s AND GID = %s AND status = 'PENDING';
+        """, (TID, GID), num_result) 
+
+        return [row[0] for row in records]

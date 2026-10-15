@@ -1,13 +1,10 @@
-
-
-
 # built-in
-from dataclasses import dataclass
+# from dataclasses import dataclass
 from enum import Enum, auto
 from datetime import datetime
 
 # 3rd party
-
+from strands import Agent
 
 # custom
 from harness.tool_research.agents import ResearchAgents
@@ -29,39 +26,47 @@ class ResearchStatus(Enum):
 
 
 
-@dataclass
 class Research:
-    #==== Metadata ====
+    def __init__(self, primary_goal: str, model: Agent):
+        self.primary_goal = primary_goal
+        
+        self.agents = ResearchAgents()
+        #==== DB ====
+        self.db = ResearchDB()
 
-    ID: int
-    # isPaused : bool ?
-    status: ResearchStatus = ResearchStatus.PENDING
+        #==== Agent Handler ====
+        self.model = model
+        agents = ResearchAgents(model = model)
 
-    created_at: datetime
-    elapsed_sec: float = 0.0
+        #==== Metadata ====
+        self.TID = self.db.insert_task(primary_goal)
+        self.status = ResearchStatus.PENDING
 
-    primary_goal: str
+        self.created_at = datetime.now()
+        elapsed_sec: float = 0.0
 
+        self.primary_goal: str
 
-    #==== Agents ====
-    agents = ResearchAgents
-    #==== DB ====
-    db = ResearchDB
-    #==== Logs ====
+        #==== Logs ====
+
 
 
     #==== methods ====
     def Run(self):
     # planner lifecycle???
         # llm.set(TID)???
-        self.agents.Plan() # heartbeat?
 
-        # 반복문
-        # TODO : 하나의 intent를 받아옴
-        self.agents.Execute()
-        
+        # TID -> GIDs.
+        self.agents.Plan(self.db.get_task_report()) # heartbeat?
+
+        # GIDs -> intents
+        intents: list[str] = self.db.get_intents(self.TID)
+        for intent in intents:
+            self.agents.Execute(intent)
+
 
     def Pause(self):
+        # 이전 기억을 저장했다 불러오려면, Worker에게조차 session을 써야 하나?
         pass
 
     def Resume(self):
