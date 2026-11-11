@@ -1,6 +1,12 @@
+"""[db.py: Research DB]
+An abstracted DB interface class for research agent.
+controls a PostgreSQL db running in a docker container.
+""" 
+
 # 1. built-in
 import os
-from abc import ABC, abstractmethod # Abstract Base Class
+from abc import ABC, abstractmethod
+from unittest import result # Abstract Base Class
 
 
 # 3. third-party
@@ -14,6 +20,11 @@ import psycopg
 class ResearchDB:
     """연결·쿼리 실행·테이블 목록만 책임진다."""
     def __init__(self, config: dict, options: dict = {}):
+        """params
+            - config: how to connect to PostgreSQL
+            - options: how to configure ResearchDB
+        """
+
         self.options = options
         """options = {
             "CHECK_SOURCE_DOUBLE": False        # if True, supervisor agent DOUBLE CHECKS the `finding` table with `evidence` table and related documents.
@@ -41,6 +52,10 @@ class ResearchDB:
             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'""")
         self.tables = {r[0] for r in rows}
 
+
+        
+
+
     def close(self):
         self.conn.close()
 
@@ -50,7 +65,7 @@ class ResearchDB:
 class BaseTable(ABC):
     """Abstract Base Class for all tables"""
     name: str
-    enums: dict[str, tuple[str, ...]] = {} # {"task_status": ("IDLE", ...)}
+    enums: dict[str, tuple[str, ...]] = {} # {"task_status": ("IDLE", ...)} # 중복 허용 X
 
     def __init__(self, db: "ResearchDB"):
         self.db = db            # DB를 reference로 받음.
@@ -281,7 +296,9 @@ class AnnotationTable(BaseTable):
 class TaskTable(BaseTable):
     """Task is a unit of research project. One Task can have multiple Goals."""
     name = "task"
-    enums = {"task_status": ("IDLE", "RUNNING", "PAUSED", "DONE")}
+    enums = {"task_status": ("PENDING", "RUNNING", 
+                             "DONE", "FAILED", "TIMEOUT", 
+                             "DISCARDED")}
 
     @property
     def ddl(self) -> str:
@@ -289,7 +306,7 @@ class TaskTable(BaseTable):
             CREATE TABLE task (
                 TID             SERIAL PRIMARY KEY,
                 PRIMARY_GOAL    TEXT NOT NULL,
-                STATUS          task_status NOT NULL DEFAULT 'IDLE'
+                STATUS          task_status NOT NULL DEFAULT 'PENDING'
             );"""
 
     def insert_task(self, primary_goal: str) -> int | None:
@@ -308,9 +325,36 @@ class TaskTable(BaseTable):
         )
         print("Task deleted from database: " + str(tid))
 
+    # ── research level ──
+
+    def set_task_status(self, tid: int, status: str):
+        if status not in self.enums["task_status"]:
+            raise ValueError(f"Invalid status: {status}. Must be one of {self.enums['task_status']}.")
+        self.db.execute_query(
+            "UPDATE task SET STATUS = %s WHERE TID = %s;",
+            (status, tid)
+        )
+    def get_task_status(self, tid: int) -> str:
+        result = self.db.execute_query(
+            "SELECT STATUS FROM task WHERE TID = %s;",
+            (tid,)
+        )
+        if not result:
+            raise ValueError(f"No task found with TID: {tid}")
+        return result[0][0]
+
+    # ── main-agent level ──
+
+    def extend_task(self, tid:int, new_primary_goal: str):
+        self.db.execute_query(
+            "UPDATE task SET PRIMARY_GOAL = %s WHERE TID = %s;",
+            (new_primary_goal, tid)
+        )
+
 
 class GoalTable(BaseTable):
     """Goal is a specific objective to be achieved within a Task."""
+    """Goal은 Intent를 만들기 위한 과정에 불과함. 모든 Intent가 완료되면 goal은 자동으로 완료됨. 검증은 primary goal과 한 번에 비교."""
     name = "goal"
     enums = {"goal_status": ("OPEN", "MET", "ABANDONED")}
 
@@ -340,26 +384,58 @@ class GoalTable(BaseTable):
             (tid, gid, goal)
         )
 
+    def get_goals(self, tid: int, gids: list[int] | None = None) -> list[tuple[int, str, str]]:
+        if gids is None: # get all goals for the task.
+            result = self.db.execute_query(
+                "SELECT GID, GOAL, STATUS FROM goal WHERE TID = %s;",
+                (tid,)
+            )
+        else:
+            result = self.db.execute_query(
+                "SELECT GID, GOAL, STATUS FROM goal WHERE TID = %s AND GID IN %s;",
+                (tid, tuple(gids))
+            )
+        return result
+
+
 class IntentTable(BaseTable):
     """Intent is an explicit and specific unit of work to achieve a Goal."""
     # TODO: 실행 후 삭제하게 하려면 IID로 지우고, 작업 record를 만들고 싶으면 enum으로 상태 관리하면 될 듯.
     name = "intent"
+    enums = {"intent_status": ("OPEN", "EXECUTING", "DONE", "FAILED")}
 
     @property
     def ddl(self) -> str:
+        # GID는 Null일 수 있다. 이는 특수 Intent로, 자동으로 worker에 할당하지 않는다. 
+        #   예를들어 supervise Intent는 primary goal이 달성되었는지 검증하며 try_report() 호출 시에만 특수 worker에 할당한다.
+        # IID는 SERIAL(task 전체에서 같은 Intent가 중복되지 않게 하자는 취지로 Task별로 생성.)
         return f"""
             CREATE TABLE intent (
                 TID             INT REFERENCES task(TID) ON DELETE CASCADE,
                 GID             INT REFERENCES goal(GID) ON DELETE CASCADE,
                 IID             SERIAL PRIMARY KEY,
                 INTENT          TEXT NOT NULL,
+                STATUS          intent_status  NOT NULL DEFAULT 'OPEN'
             );"""
 
     def insert_intent(self, tid: int, gid: int, intent: str):
-        self.db.execute_query( # TODO: 아직 IID는 serial.?
+        self.db.execute_query(
             "INSERT INTO intent (TID, GID, INTENT) VALUES (%s, %s, %s);",
             (tid, gid, intent)
         )
+
+    def get_open_intents(self, tid: int) -> list[tuple[int, int, str]]:
+        """먼저 등록한 Intent를 먼저 수행하도록 IID 오름차순 정렬 후 반환."""
+        result = self.db.execute_query(
+            """
+            SELECT GID, IID, INTENT
+            FROM intent
+            WHERE TID = %s AND STATUS = 'OPEN';
+            ORDER BY IID ASC;
+            """,
+            (tid,)
+        )
+        return result
 
 # ──────────────── 3. Research Tables ────────────────
 
@@ -378,12 +454,13 @@ class FindingTable(BaseTable):
                 GID             INT REFERENCES goal(GID) ON DELETE CASCADE,
                 FINDINGID       INT NOT NULL,
                 FINDING         TEXT NOT NULL,
+                ISDIRECT        BOOLEAN NOT NULL,
                 STATUS          finding_status  NOT NULL DEFAULT {default_status},
 
                 PRIMARY KEY (TID, GID, FINDINGID)
             );"""
     
-    def insert_finding(self, tid: int, gid: int, finding: str):
+    def insert_finding(self, tid: int, gid: int, finding: str, is_direct: bool):
         # 해당 TID만 이용해 다음 FINDINGID를 계산 (Task별 Finding은 독립적이므로 GID는 고려하지 않음)
         result = self.db.execute_query("""
             SELECT COALESCE(MAX(FINDINGID) + 1, 0)
@@ -394,9 +471,30 @@ class FindingTable(BaseTable):
         findingid = result[0][0]
 
         self.db.execute_query(
-            "INSERT INTO finding (TID, GID, FINDINGID, FINDING) VALUES (%s, %s, %s, %s);",
-            (tid, gid, findingid, finding)
+            "INSERT INTO finding (TID, GID, FINDINGID, FINDING, ISDIRECT) VALUES (%s, %s, %s, %s, %s);",
+            (tid, gid, findingid, finding, is_direct)
         )
+
+    def get_findings(self, tid: int, gid: int | None = None) -> list[tuple[int, str, bool, str]]:
+        if gid is None:
+            result = self.db.execute_query(
+                "SELECT FINDINGID, FINDING, ISDIRECT, STATUS FROM finding WHERE TID = %s;",
+                (tid,)
+            )
+        else:
+            result = self.db.execute_query(
+                "SELECT FINDINGID, FINDING, ISDIRECT, STATUS FROM finding WHERE TID = %s AND GID = %s;",
+                (tid, gid)
+            )
+        return result
+    # TODO: 나중에 위 함수랑 합치던가.
+    def get_open_findings(self, tid: int) -> list[tuple[int, str, bool]]:
+        result = self.db.execute_query(
+            "SELECT FINDINGID, FINDING, ISDIRECT FROM finding WHERE TID = %s AND STATUS = 'OPEN';",
+            (tid,)
+        )
+
+        return result
 
 class EvidenceTable(BaseTable):
     """Evidence is a piece of information or data that connects findings and leaf node of ToC."""
@@ -432,3 +530,9 @@ class EvidenceTable(BaseTable):
             (tid, gid, evidenceid, findingid, docid, toc_nodeid, location)
         )
 
+    def get_evidences(self, tid: int, findingid: int) -> list[tuple[int, int, int, int, int, str]]:
+        result = self.db.execute_query(
+            "SELECT GID, EVIDENCEID, DOCID, TOC_NODEID, LOCATION FROM evidence WHERE TID = %s AND FINDINGID = %s;",
+            (tid, findingid)
+        )
+        return result

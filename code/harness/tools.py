@@ -51,12 +51,12 @@ def clock() -> str:
 
 
 
-@tool(name="command_executor", description=f"Execute a shell command and return the output. Allowed commands: {{cat, cd, date, find, grep, head, ls, pwd, stat, tail, whoami, uptime}} (max output length: {MAX_TOOL_OUTPUT_LENGTH} characters)")
-def command_executor(command: str) -> str:
+@tool(name="shell", description=f"Execute a shell command and return the output. Allowed commands: {{cat, cd, date, find, grep, head, ls, pwd, stat, tail, whoami, uptime}} (max output length: {MAX_TOOL_OUTPUT_LENGTH} characters)")
+def shell(command: str) -> str:
     """Executes a shell command and returns the output. Only allows a predefined set of commands."""
     MAX_OUTPUT_LENGTH = MAX_TOOL_OUTPUT_LENGTH
     allowed_commands = ["cat", "cd", "date", "find", "grep", "head", "ls", "pwd", "stat", "tail", "whoami", "uptime"]
-    logger.debug(f"command_executor called with command=`{command}`.")
+    logger.debug(f"shell called with command=`{command}`.")
 
     try:
         command_name = command.split()[0]
@@ -117,7 +117,7 @@ TOOLS_FOR_RESEARCH_LEADER = [
 
 TOOLS_FOR_RESEARCH_SUPERVISOR = [
     clock,
-    command_executor,
+    shell,
     web_fetch,
     web_find,
     web_read,
@@ -125,7 +125,7 @@ TOOLS_FOR_RESEARCH_SUPERVISOR = [
 
 TOOLS_FOR_RESEARCH_SUBAGENT = [
     clock,
-    command_executor,
+    shell,
     web_fetch,
     web_find,
     web_read,
@@ -157,7 +157,7 @@ def create_research_tool(model):
 
 BASE_TOOLS = [
     clock,
-    command_executor,
+    shell,
     web_fetch,
     web_find,
     web_read,
