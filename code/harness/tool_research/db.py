@@ -41,17 +41,12 @@ class ResearchDB:
     def execute_query(self, query, params=None, num_result: int = -1):
         with self.conn.cursor() as cur:
             cur.execute(query, params)
-<<<<<<< HEAD
 
-            if cur.description:  # SELECT 쿼리인 경우
-                if num_result > 0:
-                    return cur.fetchmany(num_result)
-                else:
-                    return cur.fetchall() # 모든 결과
+            if cur.description:
+                return cur.fetchmany(num_result) if num_result > 0 else cur.fetchall()
             else:  # INSERT, UPDATE, DELETE 쿼리인 경우
                 self.conn.commit()
                 return None
-
 
 
 
