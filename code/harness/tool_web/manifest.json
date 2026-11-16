@@ -1,0 +1,9 @@
+{
+  "manifest_version": 2,
+  "name": "dom-sender",
+  "version": "1.1",
+  "browser_specific_settings": { "gecko": { "id": "dom-sender@local" } },
+  "permissions": ["tabs", "webRequest", "<all_urls>"],
+  "background": { "scripts": ["client.js"] },
+  "browser_action": { "default_title": "DOM을 로컬 서버로 전송" }
+}
