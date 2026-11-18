@@ -9,8 +9,7 @@ from urllib.parse import unquote
 
 # 3. custom (Worker는 harness 쪽에서 만들어 주입)
 
-TOKEN = "dev-token"  # client.js의 TOKEN과 동일해야 함
-FAIL = "Failed to fetch the URL. "
+
 
 
 @dataclass

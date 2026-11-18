@@ -2,7 +2,7 @@ import json
 import subprocess
 import zipfile
 from pathlib import Path
-
+import psutil
 
 
 # 격리 프로필용 설정: 확장 자동 활성화 + 첫 실행/텔레메트리 팝업 제거
@@ -32,8 +32,8 @@ class BrowserSession:
         self.firefox = firefox_path
         self.profile = Path(profile_dir).resolve()
         self.ext_dir = Path(ext_dir).resolve()
-        self.proc = None
-        self.isExtensionLoaded = False
+        self.process = None
+        # self.isExtensionLoaded = "on" if time.time() - getattr(server, "last_poll", 0) < 10 else "off"
 
     def start(self):
         self.profile.mkdir(parents=True, exist_ok=True)
@@ -46,16 +46,20 @@ class BrowserSession:
         (self.profile / "user.js").write_text("\n".join(lines), encoding="utf-8")
 
         # 시작 창 하나는 계속 남겨 두어, job 창이 모두 닫혀도 브라우저가 종료되지 않게 한다
-        self.proc = subprocess.Popen([self.firefox, "-profile", str(self.profile), "-no-remote", "about:blank"])
+        self.process = subprocess.Popen([self.firefox, "-profile", str(self.profile), "-no-remote", "about:blank"])
+        import time; time.sleep(2)  # 브라우저가 완전히 뜰 때까지 잠시 대기
+        print("pid:", self.process.pid, "poll:", self.process.poll())
+
 
     def stop(self):
-        if not self.proc:
+        if not self.process:
             return
-        self.proc.terminate()
+        self.process.terminate()
         try:
-            self.proc.wait(10)
+            self.process.wait(10)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
+            self.process.kill()
+        self.process = None
 
     def _install_extension(self, ext_id, ext_files):
         ext_path = self.profile / "extensions"
@@ -67,15 +71,13 @@ class BrowserSession:
                     z.write(self.ext_dir / name, name)
 
         except OSError as e:
-            print(f"Session is already running: {e}")
-
-        self.isExtensionLoaded = (ext_path / f"{ext_id}.xpi").exists()
+            print(f"Browser is already open: {e}")
 
 
-    # dashboard 
-    def get_dashboard_widget(self):
-        payload = {"type": "group", "name": "Browser", "children": [
-            {"type": "lamp", "name": "server", "value": "on" if self.proc and self.proc.poll() is None else "off"},
-            {"type": "lamp", "name": "DOM-sender", "value": "on" if self.isExtensionLoaded else "off"}
-        ]}
-        return payload
+    def is_browser_alive(self):
+        key = str(self.profile).lower()
+        for p in psutil.process_iter(["name", "cmdline"]):
+            if p.info["name"] and "firefox" in p.info["name"].lower():
+                if any(key in (a or "").lower() for a in (p.info["cmdline"] or [])):
+                    return True
+        return False

@@ -1,9 +1,11 @@
 // ━━━━━━━━━━━━━━━━━━━━ CONFIG ━━━━━━━━━━━━━━━━━━━━
 const BROKER = "http://127.0.0.1:11101";
-const TOKEN = "dev-token";            // broker.py의 TOKEN과 동일해야 함
+const TOKEN = "tool_web";            // broker.py의 TOKEN과 동일해야 함
 const MAX_CONCURRENT = 1;             // 병렬 job 수. job마다 별도 창을 쓰므로 늘려도 구조 변경 없음
+const FETCH_ENDPOINT_PATH = "job-report"
 const LOAD = { idleMs: 500, domQuietMs: 500, domQuietMaxMs: 5000, timeoutMs: 20000 };
 const HUMAN_TIMEOUT_MS = 5 * 60 * 1000;
+
 const WAKE_LAZY = true;               // 캡처 전 한 번 끝까지 스크롤해 lazy 콘텐츠를 깨움
 const CHALLENGE_RE = /just a moment|attention required|verify you are human|are you human|access denied/i;
 const CHALLENGE_SELECTOR = 'iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], #challenge-form, .g-recaptcha, .h-captcha, .cf-turnstile';
@@ -12,7 +14,7 @@ const CHALLENGE_SELECTOR = 'iframe[src*="challenges.cloudflare.com"], iframe[src
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const run = async (tabId, code) => (await browser.tabs.executeScript(tabId, { code }))[0];
 const sendEvent = (id, state, detail = "") =>
-  fetch(`${BROKER}/job-event`, {
+  fetch(`${BROKER}/${FETCH_ENDPOINT_PATH}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Token": TOKEN },
     body: JSON.stringify({ id, state, detail })
@@ -191,8 +193,8 @@ async function pollLoop() {
   while (true) {
     if (active >= MAX_CONCURRENT) { await sleep(300); continue; }
     try {
-      const res = await fetch(`${BROKER}/next-job`, { headers: { "X-Token": TOKEN } });
-      if (res.status === 204) continue;
+      const res = await fetch(`${BROKER}/next-job`, { headers: { "X-Token": TOKEN } }); // TODO: next-job이 뭔데? pytho에는 그런 게 없는데?
+      if (res.status === 204) { await sleep(500); continue; }  // no job interval
       if (res.status !== 200) { await sleep(3000); continue; }
       const job = await res.json();
       active++;
@@ -202,7 +204,7 @@ async function pollLoop() {
 }
 pollLoop();
 
-// ━━━━━━━━━━━━━━━━━━━━ MANUAL TRIGGER (툴바 버튼) ━━━━━━━━━━━━━━━━━━━━
+// ──────────────── MANUAL TRIGGER (툴바 버튼) ────────────────
 browser.browserAction.onClicked.addListener(async (tab) => {
   const job = activeJobs.get(tab.id);
   if (job) job.force = true;          // 사람 개입 대기 중이면 "지금 캡처"

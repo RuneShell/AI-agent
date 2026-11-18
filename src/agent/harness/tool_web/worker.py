@@ -19,7 +19,7 @@ class FileManager:
 
 
     def save_html(self, data, filename=""):
-        filename = f"{str(datetime.now().strftime("%H%M%S"))}{filename}"
+        filename = f"{str(datetime.now().strftime('%H%M%S'))}{filename}"
 
         with open(f"{self.path}/{filename}", "w", encoding="utf-8") as f:
             f.write(data)

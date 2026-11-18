@@ -5,8 +5,7 @@ controls a PostgreSQL db running in a docker container.
 
 # 1. built-in
 import os
-from abc import ABC, abstractmethod
-from unittest import result # Abstract Base Class
+from abc import ABC, abstractmethod # Abstract Base Class
 
 
 # 3. third-party
