@@ -1,22 +1,18 @@
 # 1. built-in
 import json
-import sys
-import traceback
 import time
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote
-import queue
 from dataclasses import dataclass, field
-import uuid  # job에 unique id를 부여하기 위해
 
-
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
+import queue # job queue
+import uuid  # job id (unique)
+import base64 # decode returned image
 
 # 2. third-party
 
 # 3. custom
-# from worker import Worker
-# worker = Worker() # temp. TODO: 이름을 바꿀 것.
+from worker import Worker
 from browser import BrowserSession
 from log_poller import LogPoller
 
@@ -27,39 +23,17 @@ def log(*args):
 
 
 # TODO : 전역변수 다 집어넣기
+AUTH_TOKEN = "tool_web"
 GET_ENDPOINT_PATH = "jobs/next"
 POST_ENDPOINT_PATH = "jobs/report"
 
 FIREFOX_PATH = r"C:\Program Files\Firefox Developer Edition\firefox.exe"
-PROFILE_DIR = r"C:\Users\Computer\AppData\Roaming\Mozilla\Firefox\Profiles\tool_web"
+# notebook
+# PROFILE_DIR = r"C:\Users\Computer\AppData\Roaming\Mozilla\Firefox\Profiles\tool_web"
+# EXT_DIR = r".\src\agent\harness\tool_web\browser"
+# PC
+PROFILE_DIR = r"C:\Users\admin\AppData\Roaming\Mozilla\Firefox\Profiles\tool_web"
 EXT_DIR = r".\src\agent\harness\tool_web\browser"
-
-"""
-dashboard에 보낼 목록
-
-reply,
-options, post, log-수집된 목록
-broker queue, running job 목록.
-
-"""
-
-
-"""How to assemble classes
-broker = Broker(ip, port)
-frontend_server = BrokerHTTPServer(ip, port, broker)
-frontend_server.start()
-
-broker.fetch(url)  # blocking until job is done
-
-frontend_server.stop()
-"""
-
-
-"""
-Job.result
-wait_extension_ready
-token
-"""
 
 
 
@@ -130,13 +104,13 @@ class Broker:
             self.server_thread = None
             print("Server DOWN.")
 
-        # stop server
+        # stop browser
         if self.browser.process:
             self.browser.stop()
             print("Browser DOWN.")
 
     # ──────── agent tool ────────
-    def fetch(self, url: str, timeout: float = 30.0) -> str:
+    def fetch(self, url: str, timeout: float = 60.0) -> str:
         job = self.Job(url)
         self.job_ready.put(job)
 
@@ -181,7 +155,9 @@ class BrokerHTTPServer(ThreadingHTTPServer):
         self.server_address = (host_ip, host_port)
         super().__init__(self.server_address, HTTPHandler)
         self.last_poll = 0 # 마지막에 extension이 poll한 시각. dashboard에서 표시용.
-        
+
+        self.worker = Worker() # 받은 파일을 작업
+
         self.take_job = take_job
         self.report_job = report_job
 
@@ -190,18 +166,22 @@ class BrokerHTTPServer(ThreadingHTTPServer):
 
 
 class HTTPHandler(BaseHTTPRequestHandler):
+    @property
+    def worker(self) -> Worker: 
+        # `this.server.worker` is not intuitive (server does not have worker), so wrap it.
+        return self.server.worker
+    
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*") # 모든 출처 허용 # TODO : 제한. token?
-        # custom headers: X-Kind, X-Source-Url, X-Filename
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token, X-Kind, X-Source-Url, X-Filename")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST")
 
     def _reply(self, status, text):
         # == expected Responses ==
         # 200 OK
-        # 400 Bad Request : Invalid file type
-        # 403 Forbidden : Invalid source URL
-        # 500 Internal Server Error
+        # 204 No Content : no job
+        # 401 Unauthorized : Invalid X-Auth-Token
+        # 404 Not Found : Invalid endpoint
 
         # url 전송 시 str / response=401 시 bytes.
         body = text if isinstance(text, bytes) else text.encode("utf-8")
@@ -213,22 +193,19 @@ class HTTPHandler(BaseHTTPRequestHandler):
         self.wfile.write(body) # send response to client
 
     def _check_auth(self):
-        if self.headers.get("X-Token") == "tool_web":
+        if self.headers.get("X-Auth-Token") == AUTH_TOKEN:
             return True
         self._reply(401, "Unauthorized")
         return False
 
-    def do_OPTIONS(self): # preflight request
-        self._reply(204, "")
-
+    # ──────────────── client-side (extension) ────────────────
     def do_GET(self): # extension이 long-polling으로 job을 받아가는 요청.
         self.server.last_poll = time.time()
-
-        # check if authed
-        # if not self._check_auth():
-        #     return
-
-        # TODO: if self.path != f"/{GET_ENDPOINT_PATH}": return self._reply(404, "Not Found")
+        # check if valid
+        if not self._check_auth():
+            return
+        if self.path != f"/{GET_ENDPOINT_PATH}":
+            return self._reply(404, "Invalid endpoint.")
 
         job = self.server.take_job() # broker의 take_job() 호출
         if not job:
@@ -247,89 +224,53 @@ class HTTPHandler(BaseHTTPRequestHandler):
         print(f"job 전달됨: {job.url}")
 
     def do_POST(self):
-        print(f"POST {self.path} from {self.client_address}`")
-        # check if authed
-        # if not self._check_auth():
-        #     return
+        #check if valid
+        if not self._check_auth():
+            return
+        if self.path != f"/{POST_ENDPOINT_PATH}":
+            return self._reply(404, "Invalid endpoint.")
 
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
         kind = self.headers.get("X-Kind")
-        log(f"[recieved] kind={kind} bytes={length}")
+        log(f"POST {self.path} from {self.client_address} kind={kind} bytes={length}")
 
         if self.path == f"/{POST_ENDPOINT_PATH}":
             event = json.loads(body)
 
-            # TODO: 반환된 job을 처리
-            print(f"job report: {event}")
+            job_status = event["status"]
+            result = event["result"]
 
-            self.server.report_job(event["id"], event.get("result", ""))
+            meta = result["meta"]
+            url = result['url']
+
+            if job_status == "ok":
+                print(f"job {url} completed successfully.")
+
+                # Handling files
+                if result["kind"] == "html":
+                    cleaned_html, links = self.worker.clean(result["html"])
+                    # TODO: save links to DB?
+                    self.worker.file_manager.save_html(cleaned_html, "clean.html")
+                elif result["kind"] == "image":
+                    raw = base64.b64decode(result["bytes_b64"])  # bytes_b64 → bytes decoding
+                    self.worker.file_manager.save_img(raw, meta, filename=result["filename"])
+ 
+                self.server.report_job(event["id"], meta)
+
+
+                
+            elif job_status == "failed":
+                print(f"job {url} failed: {event.get('result', '')}")
+                self.server.report_job(event["id"], f"[failed] {event.get('error', '')}")
+                pass
+            elif job_status == "needs_human":
+                print(f"job {url} needs human intervention.")
+                pass
+            else:
+                print(f"Unknown job status: {job_status}")
+
             return self._reply(200, "ok")
-
-        # TODO: 헤더 처리.
-
-    #     try:
-    #         # ===========================
-
-    #         # 1. image의 경우 - 바로 저장
-    #         if kind == "image":
-    #             self.handle_image(body)
-
-    #         # 2. html의 경우 - 따로 처리 후 저장
-    #         elif kind == "html":
-    #             self.handle_html(body)
-
-    #         else:
-    #             #self._reply(400, f"unknown kind: {kind}")
-    #             return
-
-    #         # ===========================
-
-    #         self._reply(200, "ok")
-
-    #     except Exception:
-    #         traceback.print_exc()
-    #         sys.stderr.flush()
-    #         # try:
-    #         #     self._reply(500, "server error (see server console)")
-    #         # except Exception:
-    #         #     pass
-    #         print("POST failed")
-
-    # def handle_image(self, body: bytes):
-    #     meta = {
-    #         "content_type": self.headers.get("Content-Type"),
-    #         "url": unquote(self.headers.get("X-Source-Url", "")),
-    #         "filename": unquote(self.headers.get("X-Filename", "image")),
-    #     }
-    #     log("[image]", meta["content_type"], meta["filename"], meta["url"], f"{len(body)} bytes")
-    #     # TODO: 저장
-
-    # def handle_html(self, body: bytes):
-    #     payload = json.loads(body)
-
-    #     html = payload.get('html', '')
-    #     css  = payload.get("css", [])
-    #     js   = payload.get("js", [])
-    #     meta = payload.get("meta", {}) # ['url', 'canonical', 'title', 'captured_at', 'ready_state', 'selection', 'scroll', 'viewport': {'width', 'height'}, 'frames']
-
-    #     ready_state = meta["ready_state"]
-    #     selection = meta["selection"]
-
-    #     # 전체를 print하면 수 MB가 쏟아지므로 요약만 출력
-    #     log(f"[html] {payload.get("url")} (ready={ready_state})")
-    #     log(f"\thtml={len(html)}, css={len(css)}, js={len(js)} chars.")
-    #     log(f"\tselection={selection if selection else "None"}, {meta["frames"]}")
-
-
-    #     # 일단 원본 백업
-    #     worker.file_manager.save_html(html, "raw.html")
-
-    #     # agent가 읽기 좋도록 clean
-    #     cleaned, links = worker.clean(html)
-    #     worker.file_manager.save_html(cleaned, "clean.html")
-
-
 
 
 
@@ -340,7 +281,7 @@ if __name__ == "__main__":
     broker = Broker("127.0.0.1", 11101, poller)
     broker.start()
 
-    broker.fetch("https://example.com")
+    broker.fetch(r"https://example.com")
 
     broker.stop()
     poller.stop()

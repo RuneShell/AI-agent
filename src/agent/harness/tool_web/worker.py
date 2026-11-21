@@ -1,8 +1,8 @@
 # 1. built-in
+import os
 import pathlib
 from datetime import datetime
-import re
-import mimetypes # type 추정용
+# import mimetypes # type 추정용
 
 # 2. third-party
 from bs4 import BeautifulSoup
@@ -33,33 +33,35 @@ class FileManager:
             return content
 
 
-    def save_img(self, img, meta: dict, filename=""):
+    def save_img(self, img: bytes, meta: dict, filename=""):
 
-        def __mime_to_extension(content_type: str) -> str:
-            # "image/jpeg; charset=..." 같은 부가 정보 제거
-            mime = (content_type or "").split(";")[0].strip().lower()
-            if mime in self.EXT_MAP:
-                return self.EXT_MAP[mime]
-            ext = mimetypes.guess_extension(mime)
-            return ext.lstrip(".") if ext else "bin"
+        # [disabled] inferring file extension. - not needed.
+        # def __mime_to_extension(content_type: str) -> str:
+        #     # "image/jpeg; charset=..." 같은 부가 정보 제거
+        #     mime = (content_type or "").split(";")[0].strip().lower()
+        #     if mime in self.EXT_MAP:
+        #         return self.EXT_MAP[mime]
+        #     ext = mimetypes.guess_extension(mime)
+        #     return ext.lstrip(".") if ext else "bin"
 
-        if filename == "":
-            filename = datetime.now().strftime("%H%M%S")
-        ext = __mime_to_extension(meta["content_type"])
-        path = f'{self.path}/{filename}.{ext}'
-        with open(path, "wb") as f:
+        # if filename == "":
+        #     filename = datetime.now().strftime("%H%M%S")
+        # ext = __mime_to_extension(meta["content_type"])
+        # path = f'{self.path}/{filename}.{ext}'
+        with open(os.path.join(self.path, filename), "wb") as f:
             f.write(img)
-        print(f'[saved] {filename}.{ext} from {meta["url"]}')
+        print(f'[saved] {filename} from {meta["url"]}')
 
 
 
 
 class Worker:
-    def __init__(self):
-        self.file_manager = FileManager(".")
+    def __init__(self, results_dir="./tool_web_results"):
+        self.file_manager = FileManager(results_dir)
 
 
     def clean(self, html: str):
+        before_clean_len = len(html)
 
         # 1. <template>은 distill 대상이므로, <div>로 변환하여 사라지지 않도록. 
         def unwrap_templates(html: str) -> str:
@@ -75,10 +77,38 @@ class Worker:
                 tag.unwrap()                             # 중첩된 html/body 래퍼 제거
             return str(soup)
         unwrapped = unwrap_templates(html) 
-
-
-        # 2. distill
         cleaned: str = PydanticAiCleanHtmlDistiller(pretty=True).distill(unwrapped)
+
+
+        # 2. 내부에 유의미한 데이터가 없는 'hidden-data' element 제거
+        def remove_hidden_data(html: str) -> str:
+            hidden = "data-hidden"
+
+            soup = BeautifulSoup(html, "html.parser")
+            for element in soup.select(f'[{hidden}]'):
+                has_content = element.get_text(strip=True) or element.find()
+
+                if not has_content:
+                    element.decompose()  # remove the element entirely
+            return str(soup)
+        cleaned = remove_hidden_data(cleaned)
+
+
+        # TODO: 무의미한 nested div를 compact할 것인가?
+        # def compact_nested_div(html: str) -> str:
+        #     soup = BeautifulSoup(html, "html.parser")
+
+        #     while True:
+        #         elements = soup.select("div")
+        #         targets = [element for element in elements if len(element.contents) == 1 and element.div]
+        #         if not targets:
+        #             break
+
+        #         for element in targets:
+        #             element.unwrap()
+        #     return str(soup)
+
+        # cleaned = compact_nested_div(cleaned)
 
 
         # 3. 링크가 전체 html의 5~15%를 차지하므로, href나 src 링크는 별도 dict에 저장하고, 숫자로 대체
@@ -108,6 +138,8 @@ class Worker:
         print(f"{len(links)} links found.")
 
 
+        after_clean_len = len(compressed)
+        print(f"[cleaned] {before_clean_len} → {after_clean_len} chars")
         return compressed, links
 
 

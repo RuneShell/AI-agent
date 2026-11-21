@@ -8,11 +8,14 @@ class Tab{
     constructor(id){
         this.id = id;
     }
+    onRequestStart(requestId){ this.inflight.add(requestId);    this.lastActivity = Date.now(); }
+    onRequestEnd(requestId){   this.inflight.delete(requestId); this.lastActivity = Date.now(); }
 
     async _runScript(code){
-        // 이 background 코드와 tab은 서로 다른 JS 환경에서 동작한다. 
+        // 이 파일(background 코드)과 tab은 서로 다른 JS 환경에서 동작한다. 
         // 따라서 tab의 `document`, `window`에 접근하기 위해 코드를 문자열로 삽입해서 실행한다.
-        return (await browser.tabs.executeScript(this.id, {code}))
+        const [result] = (await browser.tabs.executeScript(this.id, {code}))
+        return result;
     }
 
     // ────────────────  DOM CAPTURE ────────────────
@@ -22,26 +25,44 @@ class Tab{
     }
 
     // ──────────────── WAIT & LAZY LOAD ────────────────
-    async waitTabLoad(){
-        const tab = await browser.tabs.get(this.id);
+    async waitLoaded(){
         const start = Date.now();
 
         // condition 1: network 요청이 잠잠해졌는가? (HTML/CSS/JS 리소스 로드 완료 && 이동 전 빈 페이지의 complete제외 && JS의 fetch/XHR 요청 없음 && 추가적인 요청 없이 500ms 유지)
-        const isNetworkSettled = tab.status === "complete" 
-                                && tab.url !== "about:blank" 
-                                && tab.inflight.size === 0
-                                && Date.now() - tab.lastActivity >= LOAD_MS.WAIT_DOM_QUIET;
-        // condition 2: timeout 초과 시 강제 반환
-        const isTimeout = Date.now() - start < LOAD_MS.WAIT_TAB_TIMEOUT;
-
-        while (!isNetworkSettled && isTimeout){
-            await sleep(200); // 200ms마다 체크
+        const isNetworkSettled = async () => {
+            const tab = await browser.tabs.get(this.id);
+            return tab.status === "complete"
+                && tab.url !== "about:blank"
+                && this.inflight.size === 0
+                && Date.now() - this.lastActivity >= WAIT_MS.NETWORK_QUIET;
+        };
+        
+        while (!(await isNetworkSettled())){
+            // timeout 초과 시 강제 반환
+            if (Date.now() - start >= WAIT_MS.NETWORK_TIMEOUT) break;
+            await sleep(WAIT_MS.CHECK_TAB_LOAD); // 200ms마다 체크
         }
+
+        // condition 2: 요청이 잠잠해졌다면, 링크가 정상(http:// 또는 https://)인가?
+        const tabAfterLoad = await browser.tabs.get(this.id);
+        if (!/^https?:/.test(tabAfterLoad.url)) throw new Error(`load failed: ${tabAfterLoad.url}`);   // about:neterror 등
+
+        // condition 3: DOM 변경이 더 이상 없는가?
+        await this._runScript(`new Promise((resolve) => {
+            let timeout;
+            const done = () => { mutationObserver.disconnect(); resolve(true); };
+
+            const mutationObserver = new MutationObserver(() => { clearTimeout(timeout); timeout = setTimeout(done, ${WAIT_MS.DOM_QUIET}); });  // DOM 변화가 감지될 때마다 timeout을 초기화
+            mutationObserver.observe(document, { subtree: true, childList: true, characterData: true, attributes: false });  // attributes(class, style 등) 변화는 무시. DOM 구조/텍스트 변화만 감지
+
+            timeout = setTimeout(done, ${WAIT_MS.DOM_QUIET}); // DOM 변화가 없으면(mutationObserver 미호출 시) 500ms 후에 종료
+            setTimeout(done, ${WAIT_MS.DOM_TIMEOUT}); // DOM 변화가 계속되더라도 10초 후에는 종료
+        })`);
     }
 
     async wakeLazyContent(){
         /* scroll page from start to end to trigger lazy loading */
-        await this.run(`(async () => {
+        await this._runScript(`(async () => {
             const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             const end = Math.min(document.documentElement.scrollHeight, innerHeight * 20);
             for (let y = 0; y < end; y += innerHeight) { scrollTo(0, y); await sleep(150); }
@@ -53,9 +74,8 @@ class Tab{
     // ──────────────── CONDITIONAL HELPERS ────────────────
     // 정확한 감지는 불가능 — 제목/마커 요소 기반 휴리스틱. 실행 실패(페이지 이동 중 등)는 "아직 챌린지"로 간주
     async hasChallenge(){
-        CHALLENGE_REGEX = /just a moment|attention required|verify you are human|are you human|access denied/i;
         try {
-            return await run(tabId, `(() => {
+            return await this._runScript(tabId, `(() => {
             const title = document.title || "";
             const bodyLen = (document.body?.innerText || "").trim().length;
 
@@ -80,6 +100,8 @@ class Tab{
             })()`);
         } catch { return false; }
     }
+
+
 }
 
 
@@ -95,7 +117,7 @@ class TabManager{
 
     constructor(){
         // webRequest Listener 등록
-        const on = (event, handler) => event.addEventListener((d) => {
+        const on = (event, handler) => event.addListener((d) => {
             const tab = this.#tabs.get(d.tabId);   // tabId -1(탭 밖 요청)이나 추적 안 하는 탭은 여기서 걸러짐
             if (tab)    handler(tab, d);
         }, TabManager.NET_FILTER);
@@ -119,10 +141,9 @@ class TabManager{
         await browser.tabs.update(id, {url});
         return tab;
     }
-    async close(tab){
-        // TODO: tab이 아니라 id로 닫는게 낫지 않나?
-        this.#tabs.delete(tab.id);
-        await browser.tabs.remove(tab.id);
+    async close(tabId){
+        this.#tabs.delete(tabId);
+        await browser.tabs.remove(tabId);
     }
 
     get(tabId){

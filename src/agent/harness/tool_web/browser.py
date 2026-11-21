@@ -13,7 +13,7 @@ class BrowserSession:
     """engine 시작 시 격리 프로필의 Firefox를 띄우고, 종료 시 닫는다. 프로필은 유지(쿠키/캡챠 통과 기록 보존)."""
 
     EXT_ID = "dom-sender@local"  # manifest.json의 gecko id와 동일
-    EXT_FILES = ["manifest.json", "client.js", "serialize.js"]
+    EXT_FILES = ["manifest.json", "config.js", "main.js", "broker_client.js", "tab_manager.js", "serialize.js"]
 
     FIREFOX_PROFILE_PREFS = {
         "xpinstall.signatures.required": False,   # 서명 안 된 extension 설치 허용 # Developer Edition / Nightly / ESR 에서만 유효
@@ -36,7 +36,10 @@ class BrowserSession:
         # self.isExtensionLoaded = "on" if time.time() - getattr(server, "last_poll", 0) < 10 else "off"
 
     def start(self):
-        self.profile.mkdir(parents=True, exist_ok=True)
+        try:  
+            self.profile.mkdir(parents=True, exist_ok=True)
+        except FileNotFoundError:
+            print(f"프로필 경로 생성 실패: {self.profile}")
 
         # install custom extension
         self._install_extension(self.EXT_ID, self.EXT_FILES) 
@@ -47,8 +50,7 @@ class BrowserSession:
 
         # 시작 창 하나는 계속 남겨 두어, job 창이 모두 닫혀도 브라우저가 종료되지 않게 한다
         self.process = subprocess.Popen([self.firefox, "-profile", str(self.profile), "-no-remote", "about:blank"])
-        import time; time.sleep(2)  # 브라우저가 완전히 뜰 때까지 잠시 대기
-        print("pid:", self.process.pid, "poll:", self.process.poll())
+        import time; time.sleep(1)  # 브라우저가 완전히 뜰 때까지 잠시 대기
 
 
     def stop(self):
@@ -69,6 +71,7 @@ class BrowserSession:
             with zipfile.ZipFile(ext_path / f"{ext_id}.xpi", "w", zipfile.ZIP_DEFLATED) as z:   # 매번 덮어써서 코드 변경 반영
                 for name in ext_files:
                     z.write(self.ext_dir / name, name)
+            print(f"Installed extension {ext_id} to {ext_path}")
 
         except OSError as e:
             print(f"Browser is already open: {e}")
