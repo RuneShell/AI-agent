@@ -18,12 +18,13 @@ class FileManager:
         print(f"[FileManager] path: {self.path.resolve()}")
 
 
-    def save_html(self, data, filename=""):
-        filename = f"{str(datetime.now().strftime('%H%M%S'))}{filename}"
-
-        with open(f"{self.path}/{filename}", "w", encoding="utf-8") as f:
+    def save_html(self, data, filename=".html") -> str:
+        filepath = os.path.join(self.path, f"{str(datetime.now().strftime('%H%M%S'))}{filename}")
+        with open(filepath, "w", encoding="utf-8") as f:
             f.write(data)
-        print(f"[saved] {filename} ({len(data)} chars)")
+
+        print(f"[saved] {filepath} ({len(data)} chars)")
+        return filepath
 
     def read_html(self, filename):
         with open(f"{self.path}/{filename}", "r", encoding="utf-8") as f:
@@ -33,7 +34,7 @@ class FileManager:
             return content
 
 
-    def save_img(self, img: bytes, meta: dict, filename=""):
+    def save_img(self, img: bytes, meta: dict, filename: str) -> str:
 
         # [disabled] inferring file extension. - not needed.
         # def __mime_to_extension(content_type: str) -> str:
@@ -47,10 +48,13 @@ class FileManager:
         # if filename == "":
         #     filename = datetime.now().strftime("%H%M%S")
         # ext = __mime_to_extension(meta["content_type"])
-        # path = f'{self.path}/{filename}.{ext}'
-        with open(os.path.join(self.path, filename), "wb") as f:
+        
+        filepath = os.path.join(self.path, f"{str(datetime.now().strftime('%H%M%S'))}{filename}")
+        with open(filepath, "wb") as f:
             f.write(img)
-        print(f'[saved] {filename} from {meta["url"]}')
+
+        print(f'[saved] {filepath} from {meta["url"]}')
+        return filepath
 
 
 

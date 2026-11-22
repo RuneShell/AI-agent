@@ -1,5 +1,5 @@
 import random, time
-from log_poller import LogPoller
+from .log_poller import LogPoller
 
 
 class TemperatureModule:

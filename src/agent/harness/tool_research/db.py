@@ -32,7 +32,7 @@ class ResearchDB:
         """
 
         try:
-            self.conn = psycopg.connect(**config)
+            self.conn = psycopg.connect(**config, autocommit=True) # 연결을 오래 유지하므로, 실패한 트랜잭션이 이후 쿼리를 막지 않도록.
         except psycopg.OperationalError:
             raise ConnectionError(f"port {config['port']} is closed. Docker container may be down.")
         self.tables: set[str] = set()
@@ -286,8 +286,8 @@ class TreeOfContentTable(BaseTable):
         self.db.execute_query("""
             UPDATE toc
             SET PARENT_ID = %s
-            WHERE DOCID = %s AND TOC_NODEID IN (%s);
-            """, (toc_nodeid, docid, tuple(row[0] for row in candidates))
+            WHERE DOCID = %s AND TOC_NODEID = ANY(%s);
+            """, (toc_nodeid, docid, [row[0] for row in candidates]) # psycopg3는 `IN %s`에 tuple 바인딩 불가.
         )
 
     # TODO : chunking agent의 실수를 대비헤 불연속 탐지/수정 기능도 제공해야 할지도.
@@ -308,12 +308,14 @@ class AnnotationTable(BaseTable):
     def ddl(self) -> str:
         return f"""
             CREATE TABLE annotation (
-                DOCID       INT NOT NULL REFERENCES document(DOCID) ON DELETE CASCADE,
-                TOC_NODEID  INT NOT NULL REFERENCES toc(TOC_NODEID) ON DELETE CASCADE,
+                DOCID       INT NOT NULL,
+                TOC_NODEID  INT NOT NULL,
                 ANNOTID     INT NOT NULL,
                 ANNOTATION  TEXT NOT NULL,
 
-                PRIMARY KEY (DOCID, TOC_NODEID, ANNOTID)
+                PRIMARY KEY (DOCID, TOC_NODEID, ANNOTID),
+
+                FOREIGN KEY (DOCID, TOC_NODEID) REFERENCES toc(DOCID, TOC_NODEID) ON DELETE CASCADE
             );"""
 
     def insert_annotation(self, docid: int, toc_nodeid: int, annotation: str):
@@ -382,6 +384,15 @@ class TaskTable(BaseTable):
         if not result:
             raise ValueError(f"No task found with TID: {tid}")
         return result[0][0]
+    def get_task_report(self, tid: int) -> str:
+        # TODO: 지금은 primary goal만 반환. goal/intent/finding 요약 추가.
+        result = self.db.execute_query(
+            "SELECT PRIMARY_GOAL FROM task WHERE TID = %s;",
+            (tid,)
+        )
+        if not result:
+            raise ValueError(f"No task found with TID: {tid}")
+        return result[0][0]
 
     # ── main-agent level ──
 
@@ -405,7 +416,9 @@ class GoalTable(BaseTable):
                 TID             INT REFERENCES task(TID) ON DELETE CASCADE,
                 GID             INT NOT NULL,
                 GOAL            TEXT NOT NULL,
-                STATUS          goal_status  NOT NULL DEFAULT 'OPEN'
+                STATUS          goal_status  NOT NULL DEFAULT 'OPEN',
+
+                PRIMARY KEY (TID, GID)
             );"""
 
     # TODO : tid를 시스템이 넣을 순 없나?
@@ -432,8 +445,8 @@ class GoalTable(BaseTable):
             )
         else:
             result = self.db.execute_query(
-                "SELECT GID, GOAL, STATUS FROM goal WHERE TID = %s AND GID IN %s;",
-                (tid, tuple(gids))
+                "SELECT GID, GOAL, STATUS FROM goal WHERE TID = %s AND GID = ANY(%s);",
+                (tid, list(gids)) # psycopg3는 `IN %s`에 tuple 바인딩 불가.
             )
         return result
 
@@ -452,10 +465,12 @@ class IntentTable(BaseTable):
         return f"""
             CREATE TABLE intent (
                 TID             INT REFERENCES task(TID) ON DELETE CASCADE,
-                GID             INT REFERENCES goal(GID) ON DELETE CASCADE,
+                GID             INT,
                 IID             SERIAL PRIMARY KEY,
                 INTENT          TEXT NOT NULL,
-                STATUS          intent_status  NOT NULL DEFAULT 'OPEN'
+                STATUS          intent_status  NOT NULL DEFAULT 'OPEN',
+
+                FOREIGN KEY (TID, GID) REFERENCES goal(TID, GID) ON DELETE CASCADE
             );"""
 
     def insert_intent(self, tid: int, gid: int, intent: str):
@@ -470,7 +485,7 @@ class IntentTable(BaseTable):
             """
             SELECT GID, IID, INTENT
             FROM intent
-            WHERE TID = %s AND STATUS = 'OPEN';
+            WHERE TID = %s AND STATUS = 'OPEN'
             ORDER BY IID ASC;
             """,
             (tid,)
@@ -482,7 +497,7 @@ class IntentTable(BaseTable):
 class FindingTable(BaseTable):
     """Finding is a piece of information or insight discovered during the research process supporting a Goal."""
     name = "finding"
-    enums = {"finding_status": {"OPEN", "CONFIRMED", "DISMISSED"}}
+    enums = {"finding_status": ("OPEN", "CONFIRMED", "DISMISSED")}
 
     @property
     def ddl(self) -> str:
@@ -491,13 +506,15 @@ class FindingTable(BaseTable):
         return f"""
             CREATE TABLE finding (
                 TID             INT REFERENCES task(TID) ON DELETE CASCADE,
-                GID             INT REFERENCES goal(GID) ON DELETE CASCADE,
+                GID             INT,
                 FINDINGID       INT NOT NULL,
                 FINDING         TEXT NOT NULL,
                 ISDIRECT        BOOLEAN NOT NULL,
-                STATUS          finding_status  NOT NULL DEFAULT {default_status},
+                STATUS          finding_status  NOT NULL DEFAULT '{default_status}',
 
-                PRIMARY KEY (TID, GID, FINDINGID)
+                PRIMARY KEY (TID, GID, FINDINGID),
+
+                FOREIGN KEY (TID, GID) REFERENCES goal(TID, GID) ON DELETE CASCADE
             );"""
     
     def insert_finding(self, tid: int, gid: int, finding: str, is_direct: bool):
@@ -545,14 +562,17 @@ class EvidenceTable(BaseTable):
         return f"""
             CREATE TABLE evidence (
                 TID             INT REFERENCES task(TID) ON DELETE CASCADE,
-                GID             INT REFERENCES goal(GID) ON DELETE CASCADE,
+                GID             INT,
                 EVIDENCEID      INT NOT NULL,
-                FINDINGID       INT REFERENCES finding(FINDINGID) ON DELETE CASCADE,
-                DOCID           INT REFERENCES document(DOCID) ON DELETE CASCADE,
-                TOC_NODEID      INT REFERENCES toc(TOC_NODEID) ON DELETE CASCADE,
+                FINDINGID       INT,
+                DOCID           INT,
+                TOC_NODEID      INT,
                 LOCATION        TEXT NOT NULL,
 
-                PRIMARY KEY (TID, GID, EVIDENCEID, FINDINGID)
+                PRIMARY KEY (TID, GID, EVIDENCEID, FINDINGID),
+
+                FOREIGN KEY (TID, GID, FINDINGID)  REFERENCES finding(TID, GID, FINDINGID) ON DELETE CASCADE,
+                FOREIGN KEY (DOCID, TOC_NODEID)    REFERENCES toc(DOCID, TOC_NODEID)       ON DELETE CASCADE
             );"""
 
     def insert_evidence(self, tid: int, gid: int, findingid: int, docid: int, toc_nodeid: int, location: str):

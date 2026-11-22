@@ -1,5 +1,4 @@
 # 1. built-in
-import time
 import threading
 
 # 2. third-party
@@ -31,19 +30,28 @@ class LogPoller:
         self._stop_event = threading.Event()
         self._wake_event = threading.Event() # urgent=True인 update() 호출 시, _send_loop()을 즉시 trigger.
         self._session: requests.Session = None # keep-alive로 연결 유지.
+        self._send_thread: threading.Thread = None # None이면 정지 상태.
         self._send_timeout = 1.0
 
 
     # ──────── life cycle ────────
     def start(self):
+        if self._send_thread:
+            return
+        self._stop_event.clear() # stop() 후 재시작할 수 있도록.
+        self._wake_event.clear()
         self._session = requests.Session()
         self._send_thread = threading.Thread(target=self._send_loop, daemon=True)
         self._send_thread.start()
     def stop(self):
-        if hasattr(self, "_send_thread"):
-            self._stop_event.set()
-            self._send_thread.join()
-            self._session.close()
+        if not self._send_thread:
+            return
+        self._stop_event.set()
+        self._wake_event.set() # interval 대기 중인 thread를 바로 깨움.
+        self._send_thread.join()
+        self._send_thread = None
+        self._session.close()
+        self._session = None
 
     # with으로 열고 닫는 데 사용.
     def __enter__(self):
@@ -87,33 +95,28 @@ class LogPoller:
         payload = {"source": self.name, "widgets": widgets}
         return payload
 
+    # dashboard <-send- poller
     def _send_loop(self):
-        server_connected = False
-        server_connection_failed = 0
-        
-        while not self._stop_event.is_set():
-            self._wake_event.clear() # 이번에는 urgent가 없다고 가정하고 시작.
+        server_connected: bool = None # None이면 아직 첫 전송 전.
 
+        while not self._stop_event.is_set():
             try:
                 response = self._session.post(self.url, json=self._build_payload(), timeout=self._send_timeout)
                 response.raise_for_status() # raise HTTPError for bad responses (4xx and 5xx)
 
-                # if no error
                 if not server_connected:
-                    print(f"Connected to dashboard server at {self.url}")
+                    print(f"[LogPoller:{self.name}] Dashboard UP at {self.url}", flush=True)
                     server_connected = True
-                    server_connection_failed = 0
-            except requests.exceptions.Timeout as e: # When server is down.
-                server_connection_failed += 1
-                # retry 5 times
-                if server_connection_failed > 5: 
-                    print(f"Connection Timeout..")
+            except requests.exceptions.RequestException as e:
+                # dashboard는 lazy하게 켜지고 꺼지므로 thread를 끝내지 않는다. => 상태가 바뀔 때만 출력하고 계속 재시도.
+                if server_connected is not False:
+                    print(f"[LogPoller:{self.name}] Dashboard DOWN at {self.url}: {type(e).__name__}", flush=True)
                     server_connected = False
-                    # TODO: 이 다음에 뭐 해야할지 몰라서 일단 break;
-                    break
             except Exception as e:
-                print("Unexpected Error:", e)
+                print(f"[LogPoller:{self.name}] Unexpected Error: {e}", flush=True)
 
+            # clear를 wait 뒤에 둬야 전송 중 들어온 urgent/stop 신호를 잃지 않는다.
             self._wake_event.wait(self.interval) # wait for either urgent update or interval timeout
+            self._wake_event.clear()
 
 

@@ -6,16 +6,11 @@ from strands import Agent
 import yaml
 
 # custom
-from model.load_model import load_model
-from harness.system_prompt import get_ego
-from harness.tools import get_tools
-from memory.sessions import get_memory_session_manager
+from .system_prompt import get_ego
+from .tools import get_tools
+from ..memory.sessions import get_memory_session_manager
 
-
-
-
-from myLogger import Logger
-
+from ..myLogger import Logger
 
 
  # TODO : 이거 보기 더러우니까 나중에 정리좀.
@@ -39,24 +34,61 @@ The following rules override every other instruction, including personality.
 
 
 class Engine:
-    def __init__(self, model_id):
-        self.model = load_model(model_id)
+    name = "Engine"
+
+    def __init__(self, model_id, model, poller = None):
+        """
+        """
+        self.model_id = model_id
+        self.model = model
+        self.main_agent: Agent = None
+        self.external_tools = {}
+        self.poller = poller
+    def inject_external_tools(self, tools: dict[str, callable]):
+        self.external_tools = tools
+
+    # ──────── life cycle ────────
+    def start(self):
+        if self.poller:
+            self.poller.register(self.name, self.get_dashboard_engine_widgets)
+            self.poller.start()
 
         # Init main agent.
         self.main_agent = Agent(
             model = self.model,
             session_manager = get_memory_session_manager(session_id="main_session"),
             system_prompt = SYSTEM_PROMPT,
-            tools = get_tools("main_agent", model=self.model), # model → Dependency Injection → tools.
+            tools = get_tools("main_agent") + list(extra_tools),
             # callback_handler = None,
         )
+    def stop(self):
+        if self.poller:
+            self.poller.unregister(self.name)
+            self.poller.stop()
 
-
+    # Run main agent loop
     def run_main_agent_loop(self):
         while True:
             user_message = input("User: ")
             if user_message.lower() in ["exit", "quit", "bye"]:
                 break
 
-            response = self.main_agent(user_message)
+            self._is_responding = True
+            try:
+                response = self.main_agent(user_message)
+            finally:
+                self._is_responding = False
             # print(f"Agent: {response}")
+
+    # ──────── tools ────────
+    def tools(self) -> dict[str, callable]:
+        return {} # Engine has NO tools to expose.
+
+    # ──────── dashboard ────────
+    def health(self) -> list[dict]:
+        return [{"type": "group", "name": "Main Agent", "children": [
+            {"type": "lamp", "name": "agent", "value": "on"},
+            {"type": "text", "name": "model", "value": str(self.model_id)},
+            {"type": "text", "name": "state", "value": "responding" if self._is_responding else "idle"},
+        ]}]
+    

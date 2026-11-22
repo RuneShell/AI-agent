@@ -3,8 +3,8 @@ import json
 from strands import Agent, tool
 from strands.multiagent import GraphBuilder
 
-from harness.tools import TOOLS_FOR_RESEARCH_LEADER, TOOLS_FOR_RESEARCH_SUPERVISOR, TOOLS_FOR_RESEARCH_SUBAGENT
-from myLogger import Logger
+from .tools import TOOLS_FOR_RESEARCH_LEADER, TOOLS_FOR_RESEARCH_SUPERVISOR, TOOLS_FOR_RESEARCH_SUBAGENT
+from ..myLogger import Logger
 
 logger = Logger(log_dir="./logs", runner_name="research", console=True, file=True, discord=False, format="[%(levelname)s] %(asctime)s \n%(name)s - %(message)s")
 

@@ -12,9 +12,9 @@ import base64 # decode returned image
 # 2. third-party
 
 # 3. custom
-from worker import Worker
-from browser import BrowserSession
-from log_poller import LogPoller
+from .worker import Worker
+from .browser import BrowserSession
+from ...log_poller import LogPoller
 
 
 def log(*args):
@@ -45,6 +45,7 @@ class Broker:
         id:     str = field(default_factory=lambda: uuid.uuid4().hex) # 자동으로 unique id 부여
         state:  threading.Event = field(default_factory=threading.Event) # 실행 대기 시 wait(), 할당 시 set()
         result: str = ""
+        saved_path: str = "" # 저장된 파일 경로. html / image 등
 
 
     def __init__(self, host_ip: str, host_port: int, poller=None):
@@ -56,7 +57,7 @@ class Broker:
 
         # HTTP server
         self.server = BrokerHTTPServer(host_ip, host_port, 
-                                       self.take_job, self.report_job) # HTTPHandler에서 job을 다룰 함수를 넘김.
+                                       self._take_job, self._report_job) # HTTPHandler에서 job을 다룰 함수를 넘김.
         self.server_thread: threading.Thread = None
 
         # browser
@@ -115,33 +116,37 @@ class Broker:
         self.job_ready.put(job)
 
         # timeout 동안 꺼내가기를 기다림.
-        if job.state.wait(timeout):
-            return job.result
+        if job.state.wait(timeout): # wait `_report_job()` call.
+            if job.saved_path:
+                return job.saved_path # TODO 정말 file로 저장하고, 경로만 넘기는게 최적인가?
+            # else:
+            #     return job.result 
         else: # time out
             timeout = "Failed to fetch the URL: Timeout."
             job.result = timeout
             log(timeout)
             self.job_ready.put(job) # 실패 시 다시 job_ready에 넣음.
             # TODO: 그 이후에는?
-            return timeout
+            return job.result
+        
 
     # ──────── client(browser extention)-side ────────
-    def take_job(self): 
+    def _take_job(self): 
         if self.job_ready.empty():
             return None
 
         job = self.job_ready.get()
         with self._lock:
             self.job_running[job.id] = job
-        return job
-    def report_job(self, job_id: str, result: str):
+        return job 
+    def _report_job(self, job_id: str, saved_path: str):
         with self._lock:
             job = self.job_running.pop(job_id, None)
         if not job:
             log(f"[broker] report_job: job_id={job_id} not found")
             return
 
-        job.result = result
+        job.saved_path = saved_path
         job.state.set() # job이 끝났으므로 fetch()로 되돌아감.
 
 
@@ -248,15 +253,17 @@ class HTTPHandler(BaseHTTPRequestHandler):
                 print(f"job {url} completed successfully.")
 
                 # Handling files
+                saved_path = ""
                 if result["kind"] == "html":
                     cleaned_html, links = self.worker.clean(result["html"])
                     # TODO: save links to DB?
-                    self.worker.file_manager.save_html(cleaned_html, "clean.html")
+                    saved_path = self.worker.file_manager.save_html(cleaned_html, "clean.html")
+                    
                 elif result["kind"] == "image":
                     raw = base64.b64decode(result["bytes_b64"])  # bytes_b64 → bytes decoding
-                    self.worker.file_manager.save_img(raw, meta, filename=result["filename"])
+                    saved_path = self.worker.file_manager.save_img(raw, meta, filename=result["filename"])
  
-                self.server.report_job(event["id"], meta)
+                self.server.report_job(event["id"], saved_path)
 
 
                 
