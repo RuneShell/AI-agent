@@ -51,13 +51,13 @@ def main():
 
     model = load_model(MODEL_ID)
 
-
+    # TODO: 모듈식 설계 좋음. 다만 하나가 시작하다 터지면 나머지를 어떻게 할지만 고려.
     # Generate Life-cycled modules.
     engine   = Engine(model_id=MODEL_ID, model=model, poller=new_poller("Engine"))
     research = ResearchModule(model, RESEARCH_DB_CONFIG, RESEARCH_DB_OPTIONS, poller=new_poller("Tool: Research"))
     web      = WebModule(*BROKER_HTTP_SERVER_URL, poller=new_poller("Tool: Web"))
 
-    # Inject required tools each other.
+    # Inject required tools to each other.
     # engine_tools    = engine.tools()
     research_tools  = research.tools()
     web_tools       = web.tools()
@@ -67,11 +67,11 @@ def main():
     research.inject_external_tools(merge_dicts_by_keys([web_tools], 
                                                        ["web_search", "web_fetch", "web_find"]))
     web.inject_external_tools(merge_dicts_by_keys([research_tools], 
-                                                  ["chunk_document"]))
+                                                  ["toc_document"]))
 
 
     # Generate Engine and run main agent loop - with Dashboard Poller.
-    with ModuleHost(engine, research, web): # 앞에서부터 켜고, 뒤에서부터 끈다.
+    with ModuleHost([engine, research, web]): # 앞에서부터 켜고, 뒤에서부터 끈다.
         engine.run_main_agent_loop()
 
 

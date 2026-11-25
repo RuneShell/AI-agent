@@ -1,16 +1,22 @@
 # 1. built-in
+import os
 from enum import Enum, auto
+from typing import Callable
 
 # 2. third-party
 from strands import tool
 
 # 3. custom
-from .agents import ResearchAgents
+from ..module import ToolModule
+from .agents import ResearchAgents, SegmentAgent
 from .db import (ResearchDB,
                  DocumentTable, TreeOfContentTable, AnnotationTable,
                  TaskTable, GoalTable, IntentTable,
                  FindingTable, EvidenceTable)
 
+from .chunker import Chunker
+
+from ...configs import REPORT_MAX_BYTES
 from ...log_poller import LogPoller
 
 
@@ -26,23 +32,23 @@ class ResearchStatus(Enum):
 
 
 
-class ResearchModule:
+class ResearchModule(ToolModule):
     """tool_research를 main agent 옆에 붙이는 ToolModule. (규격: harness/module.py)
         - Research DB와 자기 LogPoller의 수명을 소유한다.
         - Task별 상태는 DB에 있으므로, 흐름 메서드는 TID만 받는다.
     """
     name = "Tool: Research"
 
-    def __init__(self, model, db_config: dict, db_options: dict = {}, poller: LogPoller = None):
+    def __init__(self, model, db_config: dict, db_options: dict = {}, poller: LogPoller|None = None):
         self.model = model
         self.external_tools = {}
 
         self.db_config = db_config
         self.db_options = {}
-        self.db: ResearchDB = None # None이면 정지 상태.
+        self.db: ResearchDB|None = None # None이면 정지 상태.
 
         self.poller = poller
-    def inject_external_tools(self, tools: dict[str, callable]):
+    def inject_external_tools(self, tools: dict[str, Callable]) -> None:
         self.external_tools = tools
 
 
@@ -86,11 +92,11 @@ class ResearchModule:
                 self.poller.stop()
 
     # ──────── main agent tools ────────
-    def tools(self) -> dict[str, callable]:
+    def tools(self) -> dict[str, Callable]:
         return {
             "research"       : self._create_research(),
             "extend_research": self._create_extend_research(),
-            "chunk_document" : self._create_chunk_document(),
+            "toc_document" : self._create_toc_document(),
         }
 
     def _create_research(self):
@@ -113,11 +119,24 @@ class ResearchModule:
 
         return extend_research
 
-    def _create_chunk_document(self):
-        @tool(name="chunk_document", description="")
-        def chunk_document(filepath: str) -> str:
+    def _create_toc_document(self):
+        @tool(name="toc_document", description="")
+        def toc_document(filepath: str) -> str:
             # TODO: 파일 경로 확인 - DB에 등록 - 자동 chunking loop 시작 - return chunk report
-            pass
+            if not(os.path.exists(filepath) and os.path.isfile(filepath)):
+                return f"File not exists: {filepath}"
+
+            # Insert doc info to DocumentTable
+            chunker = Chunker.from_file(filepath)  # before insert_document: normalize may change filepath
+            dir, filename = os.path.split(chunker.filepath)
+            docid = self.document.insert_document(dir, filename)
+
+            # ───── Build ToC report ────
+            toc_report = self._build_toc(docid, chunker)
+            return toc_report
+
+                
+        return toc_document
 
     # ──────── sub-agent tools ────────
     role_tools = {
@@ -157,19 +176,70 @@ class ResearchModule:
             agents.Work(open_intents, related_goals)
 
 
+    def _build_toc(self, docid: int, chunker: Chunker) -> str:
+        """
+        content 
+            -(Chunker: system)-> content chunks
+            -(Segmenter: agent)-> Table of Contents (Segment chunk and make leaf nodes)
+            -(Segmenter: agent)-> Table of Contents (Realign node borders that cut off by chunking)
+            -(Segmenter: agent)-> Table of Contents (Merge leafs to parent nodes—making wider toc)
+            -(Toc Build: system)-> ToC report
+        """
+        # 1. Chunker → 2. Segmenter
+        segmenter  = SegmentAgent(self.model, self.toc, docid)
+        boundaries = segmenter.Segment(chunker)
+
+        # 3. Realign
+        segmenter.Realign(chunker, boundaries)
+
+        # 4. Merge
+        segmenter.Merge()
+
+        # 5. build report
+        root_id, root_content, _start, last_line = self.toc.get_orphans(docid, 1, chunker.line_count)[0]  # after Merge, root is the only orphan
+        root_children = self.toc.get_children(docid, root_id)
+
+        # 5.1. pick levels by BFS, until REPORT_MAX_BYTES
+        records = {}  # {toc_nodeid: (indented record, children)}. nodes shown in report
+        level, depth, used_bytes = root_children, 0, 0
+        while level:
+            level_records = {}
+            for toc_nodeid, content, start, end in level:
+                children = self.toc.get_children(docid, toc_nodeid)
+                level_records[toc_nodeid] = ("  " * depth + f"N{toc_nodeid} L{start}~L{end} ({len(children)} children): {content}", children)
+            used_bytes += sum(len(record.encode("utf-8")) + 1 for record, _ in level_records.values())  # +1: "\n"
+            if records and used_bytes > REPORT_MAX_BYTES:
+                break  # 1st level is always shown
+            records.update(level_records)
+            level = [child for _, children in level_records.values() for child in children]
+            depth += 1
+
+        # 5.2. write in DFS order
+        lines = [f"[Document] DOCID {docid}, {chunker.filepath} (L1~L{last_line})",
+                 f"[Title] {root_content}",
+                 ""]
+        stack = list(reversed(root_children))
+        while stack:
+            toc_nodeid = stack.pop()[0]
+            if toc_nodeid in records:
+                record, children = records[toc_nodeid]
+                lines.append(record)
+                stack += reversed(children)
+
+        toc_report = "\n".join(lines)
+        return toc_report
+            
+
+
     # ──────── report ? ────────
     def _try_report(self, tid: int):
         # supervisor를 worker로 포함시켜도 되나?
         """checklist
-        if
-            all(Intent.status = NOT "OPEN") # system checks them.
-            and
-            all(Finding supported by their Evidences)  # supervisor checks them.
-            and
-            sum(Finding) supports Primary Goal. # supervisor checks them.
-        then
-            write a report
-            return report
+        if      all(Intent.status = NOT "OPEN") # system checks them.
+            and all(Finding supported by their Evidences)  # supervisor checks them.
+            and sum(Finding) supports Primary Goal. # supervisor checks them.
+        then    write a report
+                return report
         """
 
         # 1. Check: Intent

@@ -1,5 +1,5 @@
 # 1. built-in
-from typing import Protocol, Any
+from typing import Protocol, Callable, Any
 
 # 2. third-party
 
@@ -13,12 +13,12 @@ class ToolModule(Protocol):
     """
     name: str
     # ──────── init ────────
-    def inject_external_tools(self, tools: list[Any]) -> None: ...
+    def inject_external_tools(self, tools: dict[str, Callable]) -> None: ...
     # ──────── life cycle ────────
     def start(self) -> None: ...
     def stop(self) -> None: ...
     # ──────── agent tools ────────
-    def tools(self) -> dict[str, callable]: ...
+    def tools(self) -> dict[str, Callable]: ...
     # ──────── dashboard ────────
     def health(self) -> list[dict]: ... # Dashboard에 표시할 상태 카드. (`poller=None`이면 무시됨)
 

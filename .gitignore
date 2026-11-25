@@ -15,6 +15,7 @@ test_main.py
 
 system_prompt.py
 workspace.md
+SKILL.md
 
 /tool_web_results/**
 

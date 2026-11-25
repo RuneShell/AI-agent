@@ -58,7 +58,7 @@ class Broker:
         # HTTP server
         self.server = BrokerHTTPServer(host_ip, host_port, 
                                        self._take_job, self._report_job) # HTTPHandler에서 job을 다룰 함수를 넘김.
-        self.server_thread: threading.Thread = None
+        self.server_thread: threading.Thread | None = None
 
         # browser
         self.browser = BrowserSession(FIREFOX_PATH, PROFILE_DIR, EXT_DIR)

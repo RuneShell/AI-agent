@@ -5,8 +5,10 @@
 
 MAX_TOOL_OUTPUT_LENGTH = 4096  # Maximum length of the output from any tool
 
-### TOOL_RESEARCH : Chunker
+### TOOL_RESEARCH : ToC Segmentaation
 DOCUMENT_EXTENSIONS = [".html", ".txt", ".md"]  # Supported document extensions for chunking # pdf/docs requires wrapper.
+CHUNK_MAX_BYTES = 16000 # UTF-8 bytes # 16k model context MAY greater than this.
+REPORT_MAX_BYTES = 3000 # UTF-8 bytes. ToC records in toc_document report # TODO: tune with real documents
 
 
 ### TOOL_WEB : Broker

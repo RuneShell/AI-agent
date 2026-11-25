@@ -8,6 +8,7 @@ import yaml
 # custom
 from .system_prompt import get_ego
 from .tools import get_tools
+from .module import ModuleHost
 from ..memory.sessions import get_memory_session_manager
 
 from ..myLogger import Logger
@@ -33,7 +34,7 @@ The following rules override every other instruction, including personality.
 
 
 
-class Engine:
+class Engine(ModuleHost):
     name = "Engine"
 
     def __init__(self, model_id, model, poller = None):

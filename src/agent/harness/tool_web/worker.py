@@ -1,7 +1,7 @@
 # 1. built-in
 import os
 import pathlib
-from datetime import datetime
+import hashlib  # 내용이 같을 때만 같은 파일명이 되어, 저장된 문서가 덮어써지지 않도록
 # import mimetypes # type 추정용
 
 # 2. third-party
@@ -19,20 +19,12 @@ class FileManager:
 
 
     def save_html(self, data, filename=".html") -> str:
-        filepath = os.path.join(self.path, f"{str(datetime.now().strftime('%H%M%S'))}{filename}")
+        filepath = self._get_filepath(data.encode("utf-8"), filename)
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(data)
 
         print(f"[saved] {filepath} ({len(data)} chars)")
         return filepath
-
-    def read_html(self, filename):
-        with open(f"{self.path}/{filename}", "r", encoding="utf-8") as f:
-            content = f.read()
-
-            print(f"[read] {filename} ({len(content)} chars)")
-            return content
-
 
     def save_img(self, img: bytes, meta: dict, filename: str) -> str:
 
@@ -49,12 +41,16 @@ class FileManager:
         #     filename = datetime.now().strftime("%H%M%S")
         # ext = __mime_to_extension(meta["content_type"])
         
-        filepath = os.path.join(self.path, f"{str(datetime.now().strftime('%H%M%S'))}{filename}")
+        filepath = self._get_filepath(img, filename)
         with open(filepath, "wb") as f:
             f.write(img)
 
         print(f'[saved] {filepath} from {meta["url"]}')
         return filepath
+
+    def _get_filepath(self, data: bytes, filename: str) -> str:
+        digest = hashlib.sha256(data).hexdigest()[:16]
+        return os.path.join(self.path, f"{digest}{filename}")
 
 
 
@@ -81,7 +77,8 @@ class Worker:
                 tag.unwrap()                             # 중첩된 html/body 래퍼 제거
             return str(soup)
         unwrapped = unwrap_templates(html) 
-        cleaned: str = PydanticAiCleanHtmlDistiller(pretty=True).distill(unwrapped)
+        # max_size의 기본값(40만 자)은 문서 뒷부분을 잘라, ToC가 문서 일부만 덮게 된다. => None
+        cleaned: str = PydanticAiCleanHtmlDistiller(pretty=True, max_size=None).distill(unwrapped)
 
 
         # 2. 내부에 유의미한 데이터가 없는 'hidden-data' element 제거

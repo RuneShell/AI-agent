@@ -1,5 +1,6 @@
 # 1. built-in
 import os
+from typing import Callable
 
 # 2. third-party
 from strands import tool
@@ -18,14 +19,14 @@ class WebModule:
     """
     name = "Tool: Web"
 
-    def __init__(self, host_ip: str = None, host_port: int = None, poller: LogPoller = None):
+    def __init__(self, host_ip: str, host_port: int, poller: LogPoller = None):
         self.server_address = (host_ip, host_port)
         self.external_tools = {}
         self.poller = poller # None이면 dashboard 보고 없이 동작.
 
         # web fetch - broker server
-        self.broker: Broker = None
-    def inject_external_tools(self, tools: dict[str, callable]):
+        self.broker: Broker|None = None
+    def inject_external_tools(self, tools: dict[str, Callable]):
         self.external_tools = tools
 
     # ──────── life cycle ────────
@@ -55,7 +56,7 @@ class WebModule:
                 self.poller.stop()
 
     # ──────── agent tools ────────
-    def tools(self) -> dict[str, callable]:
+    def tools(self) -> dict[str, Callable]:
         # 구현된 tool만 노출한다. (web_search / web_find / web_read는 구현 후 추가)
         return {
             "web_search": self._create_web_search(),
@@ -71,14 +72,14 @@ class WebModule:
             saved_path = self.broker.fetch(url)
 
             # saved_path may valid, and Check if it's a Document.
-            cond1 =  os.path.splittext(saved_path)[1] in DOCUMENT_EXTENSIONS:
+            cond1 =  os.path.split(saved_path)[1] in DOCUMENT_EXTENSIONS
             # if chunking tool is valid
-            chunk_document_tool = self.external_tools.get("chunk_document")
-            cond2 = chunk_document_tool is not None
+            toc_document_tool = self.external_tools.get("toc_document")
+            cond2 = toc_document_tool is not None
 
             if cond1 and cond2:
-                try:
-                    chunk_report = chunk_document_tool(saved_path)
+                try: # generate Table of Contents
+                    chunk_report = toc_document_tool(saved_path)
                     return f"`{url}` fetched and saved to `{saved_path}`. Chunking report:\n{chunk_report}"
                 except Exception as e:
                     return f"`{url}` fetched and saved to `{saved_path}`, but chunking system failed: {e}"

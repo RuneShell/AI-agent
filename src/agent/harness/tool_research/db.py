@@ -46,7 +46,7 @@ class ResearchDB:
                 return cur.fetchmany(num_result) if num_result > 0 else cur.fetchall()
             else:  # INSERT, UPDATE, DELETE 쿼리인 경우
                 self.conn.commit()
-                return None
+                return []
 
 
 
@@ -66,10 +66,11 @@ class ResearchDB:
             raise ValueError(f"Unknown table: {table_name}")
 
         with self.conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {table_name}")
-            total_count = cur.fetchone()[0]
+            cur.execute(f"SELECT COUNT(*) FROM %s", (table_name,))
+            row = total_count = cur.fetchone()
+            total_count = row[0] if row is not None else 0
 
-            cur.execute(f"SELECT * FROM {table_name} LIMIT %s", (count,))
+            cur.execute(f"SELECT * FROM %s LIMIT %s", (table_name, count,))
             records = cur.fetchall()
 
         return {"total_count": total_count, "records": records}
@@ -172,11 +173,12 @@ class DocumentTable(BaseTable):
         if not os.path.isfile(os.path.join(dir, name)):
             raise FileNotFoundError(f"File not found: {os.path.join(dir, name)}")
 
-        self.db.execute_query(
-            "INSERT INTO document (DIR, NAME) VALUES (%s, %s);",
+        result = self.db.execute_query(
+            "INSERT INTO document (DIR, NAME) VALUES (%s, %s) RETURNING DOCID;",
             (dir, name)
         )
-
+        return result[0][0]
+    
     def delete_document(self, name: str):
         self.db.execute_query(
             "DELETE FROM document WHERE NAME = %s;",
@@ -188,6 +190,13 @@ class DocumentTable(BaseTable):
 class TreeOfContentTable(BaseTable):
     """`TOC(Tree of Content)` stores the hierarchical structure of a document, allowing for efficient retrieval and management of its sections and subsections."""
     name = "toc"
+
+    MIN_LEAF_CONTENT_LENGTH   = 10
+    MAX_LEAF_CONTENT_LENGTH   = 500
+    MAX_LEAF_LOC_LENGTH       = 50000   # TODO : 확인 필요
+    MIN_PARENT_CONTENT_LENGTH = 50
+    MAX_PARENT_CONTENT_LENGTH = 200
+    MAX_PARENT_LOC_LENGTH     = 100000  # TODO : 확인 필요
 
     @property
     def ddl(self) -> str:
@@ -206,89 +215,184 @@ class TreeOfContentTable(BaseTable):
                 FOREIGN KEY (DOCID, PARENT_ID) REFERENCES toc(DOCID, TOC_NODEID)
             );"""
 
-    # TODO: docid를 시스템이 넣을 순 없나?
-    def insert_leaf(self, docid: int, content: str, start: int, end: int):
-        # TODO: 문서 안에 자체 목차가 있을 때에는?
-        MIN_CONTENT_LENGTH = 100
-        MAX_CONTENT_LENGTH = 500
-        MAX_LOC_LENGTH = 5000 # TODO : 확인 필요
 
-        if len(content) < MIN_CONTENT_LENGTH or len(content) > MAX_CONTENT_LENGTH:
-            raise ValueError("Content length is out of bounds")
-        if end - start > MAX_LOC_LENGTH:
-            raise ValueError("Location length is out of bounds")
+    # def __init__(self):
+    #     self.last_modified_line = 0 # 1-based, inclusive-range chunking. 0 means NOT modified yet.
 
-        # 해당 DOCID의 다음 TOC_NODEID를 계산
+    # ──────── ToC build loop ────────
+    def get_next_line(self, docid: int) -> int:
         result = self.db.execute_query("""
-            SELECT COALESCE(MAX(TOC_NODEID) + 1, 0)
+            SELECT COALESCE(MAX(END_LOC), 0) + 1
             FROM toc
-            WHERE DOCID = %s;
+            WHERE DOCID = %s AND ISLEAF;
             """, (docid,)
         )
-        toc_nodeid = result[0][0]
+        return result[0][0]
 
-        self.db.execute_query(
-            "INSERT INTO toc (DOCID, TOC_NODEID, CONTENT, ISLEAF, START_LOC, END_LOC, PARENT_ID) VALUES (%s, %s, %s, %s, %s, %s, %s);",
-            (docid, toc_nodeid, content, True, start, end, None)
-        )
-
-    def merge_leaves(self, docid: int, content: str, start: int, end: int):
-        MIN_CONTENT_LENGTH = 50
-        MAX_CONTENT_LENGTH = 200
-        MAX_LOC_LENGTH = 100000 # TODO : 확인 필요
-
-        if len(content) < MIN_CONTENT_LENGTH or len(content) > MAX_CONTENT_LENGTH:
-            raise ValueError("Content length is out of bounds")
-        if end - start > MAX_LOC_LENGTH:
-            raise ValueError("Location length is out of bounds")
-
-
-        # 부모가 없는 leaf 중 해당 범위에 속하는 후보 조회
-        candidates = self.db.execute_query("""
-            SELECT TOC_NODEID, START_LOC, END_LOC
+    def get_orphans(self, docid: int, start: int, end: int) -> list[tuple[int, str, int, int]]:  # [(toc_nodeid, content, start, end)] overlapping L{start}~L{end}
+        # 모든 노드는 어떤 orphan의 범위 안에 있으므로, orphan만 검사해도 겹침을 찾을 수 있다.
+        # before Merge, all leaves are orphans.
+        return self.db.execute_query("""
+            SELECT TOC_NODEID, CONTENT, START_LOC, END_LOC
             FROM toc
-            WHERE DOCID = %s
-                AND PARENT_ID IS NULL
-                AND START_LOC >= %s
-                AND END_LOC <= %s
+            WHERE DOCID = %s AND PARENT_ID IS NULL
+                AND START_LOC <= %s
+                AND END_LOC >= %s
             ORDER BY START_LOC ASC;
-            """, (docid, start, end)
+            """, (docid, end, start)
         )
-        if not candidates:
-            raise ValueError("No leaf candidates found")
 
-        # 범위의 시작과 끝이 정확히 일치하는지 검증
-        if candidates[0][1] != start:
-            raise ValueError("No leaf starts at the specified start location")
-        elif candidates[-1][2] != end:
-            raise ValueError("No leaf ends at the specified end location")
-        # 후보들이 서로 연속적으로 연결되는지 검증
-        for i in range(len(candidates) - 1):
-            if candidates[i][2] != candidates[i + 1][1]:
-                raise ValueError("Leaf locations are not contiguous")
-
-        # 해당 DOCID의 다음 TOC_NODEID를 계산
-        result = self.db.execute_query("""
-            SELECT COALESCE(MAX(TOC_NODEID) + 1, 0)
+    def get_children(self, docid: int, toc_nodeid: int) -> list[tuple[int, str, int, int]]:  # [(toc_nodeid, content, start, end)] in line order
+        return self.db.execute_query("""
+            SELECT TOC_NODEID, CONTENT, START_LOC, END_LOC
             FROM toc
-            WHERE DOCID = %s;
-            """, (docid,)
-        )
-        toc_nodeid = result[0][0]
-
-        # 부모 생성
-        self.db.execute_query("""
-            INSERT INTO toc (DOCID, TOC_NODEID, CONTENT, ISLEAF, START_LOC, END_LOC, PARENT_ID) VALUES (%s, %s, %s, %s, %s, %s, %s);
-            """, (docid, toc_nodeid, content, False, start, end, None)
+            WHERE DOCID = %s AND PARENT_ID = %s
+            ORDER BY START_LOC ASC;
+            """, (docid, toc_nodeid)
         )
 
-        # 생성된 부모 ID를 후보 leaf들의 PARENT_ID를 업데이트
-        self.db.execute_query("""
-            UPDATE toc
-            SET PARENT_ID = %s
-            WHERE DOCID = %s AND TOC_NODEID = ANY(%s);
-            """, (toc_nodeid, docid, [row[0] for row in candidates]) # psycopg3는 `IN %s`에 tuple 바인딩 불가.
+    # ──────── agent tool ────────
+    # node.doc_line_range = [START_LOC, END_LOC] (node[i].end + 1 == node[i+1].start)
+    def insert_node(self, docid: int, content: str, start: int, end: int) -> int:
+        """Creates a leaf on an uncovered range, or a parent over 2+ contiguous orphans."""
+        # TODO: 문서 안에 자체 목차가 있을 때에는?
+        self._validate_range(start, end)
+
+        # 1. 범위에 걸린 orphan이 자식 후보. 없으면 leaf.
+        children = self.get_orphans(docid, start, end)
+        is_leaf = not children
+
+        # 2. 자식은 범위를 빈틈없이, 정확히 덮어야 한다.
+        expected = start
+        for child_id, _content, child_start, child_end in children:
+            if child_start < start or child_end > end:
+                raise ValueError(f"L{start}~L{end} partially overlaps N{child_id} (L{child_start}~L{child_end}).")
+            if child_start != expected:
+                raise ValueError(f"L{expected}~L{child_start - 1} inside L{start}~L{end} is not covered by any node.")
+            expected = child_end + 1
+        if children and expected != end + 1:
+            raise ValueError(f"L{expected}~L{end} inside L{start}~L{end} is not covered by any node.")
+        if len(children) == 1:
+            raise ValueError(f"L{start}~L{end} duplicates N{children[0][0]}. A parent needs at least 2 children.")
+
+        self._validate_limits(content, start, end, is_leaf)
+
+        # 3. 노드 생성과 자식 연결은 함께 성공해야 한다.
+        # !!! RETURNING이 없으면 execute_query가 commit()을 호출해 transaction 안에서 오류가 난다.
+        with self.db.conn.transaction():
+            result = self.db.execute_query("""
+                SELECT COALESCE(MAX(TOC_NODEID) + 1, 0)
+                FROM toc
+                WHERE DOCID = %s;
+                """, (docid,)
+            )
+            toc_nodeid = result[0][0]
+
+            self.db.execute_query("""
+                INSERT INTO toc (DOCID, TOC_NODEID, CONTENT, ISLEAF, START_LOC, END_LOC, PARENT_ID)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING TOC_NODEID;
+                """, (docid, toc_nodeid, content, is_leaf, start, end, None)
+            )
+
+            if children:
+                self.db.execute_query("""
+                    UPDATE toc
+                    SET PARENT_ID = %s
+                    WHERE DOCID = %s AND TOC_NODEID = ANY(%s)
+                    RETURNING TOC_NODEID;
+                    """, (toc_nodeid, docid, [child[0] for child in children]) # psycopg3는 `IN %s`에 tuple 바인딩 불가.
+                )
+                
+        return toc_nodeid # return required.
+
+    def update_node(self, docid: int, toc_nodeid: int, *,
+                    content: str | None = None, end: int | None = None) -> dict[int, tuple[int, int]]:
+        """Updates content or end of a leaf. If end moves, the next leaf's start follows. Returns {toc_nodeid: (start, end)} of changed nodes."""
+        if content is None and end is None:
+            raise ValueError(f"No field to update for N{toc_nodeid}.")
+
+        # 1. old record를 받아옴.
+        rows = self.db.execute_query("""
+            SELECT CONTENT, ISLEAF, START_LOC, END_LOC, PARENT_ID
+            FROM toc
+            WHERE DOCID = %s AND TOC_NODEID = %s;
+            """, (docid, toc_nodeid)
         )
+        if not rows:
+            raise ValueError(f"Node not found: N{toc_nodeid} in DOCID {docid}.")
+
+        old_content, is_leaf, start, old_end, parent_id = rows[0]
+        if not is_leaf:
+            raise ValueError(f"N{toc_nodeid} is a parent. Only leaf nodes can be updated.")
+
+        # 2. 전달된 값만 반영한다.
+        new_content = old_content if content is None else content
+        new_end     = old_end     if end     is None else end
+
+        self._validate_range(start, new_end)
+        self._validate_limits(new_content, start, new_end, is_leaf=True)
+        changed = {toc_nodeid: (start, new_end)}
+
+        # 3. end를 옮기면 다음 leaf의 start가 따라간다. (node[i].end + 1 == node[i+1].start 유지)
+        next_id = None
+        if new_end != old_end:
+            if parent_id is not None:
+                raise ValueError(f"N{toc_nodeid} belongs to N{parent_id}. Its range L{start}~L{old_end} cannot move.")
+
+            rows = self.db.execute_query("""
+                SELECT TOC_NODEID, CONTENT, END_LOC, PARENT_ID
+                FROM toc
+                WHERE DOCID = %s AND ISLEAF AND START_LOC = %s;
+                """, (docid, old_end + 1)
+            )
+            if rows:
+                next_id, next_content, next_end, next_parent_id = rows[0]
+                if next_parent_id is not None:
+                    raise ValueError(f"N{next_id} belongs to N{next_parent_id}. Its start L{old_end + 1} cannot move.")
+                if new_end + 1 > next_end:
+                    raise ValueError(f"End L{new_end} empties N{next_id} (L{old_end + 1}~L{next_end}).")
+                self._validate_limits(next_content, new_end + 1, next_end, is_leaf=True)
+                changed[next_id] = (new_end + 1, next_end)
+            elif new_end > old_end:
+                for other_id, _content, other_start, other_end in self.get_orphans(docid, old_end + 1, new_end):
+                    raise ValueError(f"L{start}~L{new_end} overlaps N{other_id} (L{other_start}~L{other_end}).")
+
+        # 4. 두 노드의 수정은 함께 성공해야 한다.
+        # !!! RETURNING이 없으면 execute_query가 commit()을 호출해 transaction 안에서 오류가 난다.
+        with self.db.conn.transaction():
+            self.db.execute_query("""
+                UPDATE toc
+                SET CONTENT = %s, END_LOC = %s
+                WHERE DOCID = %s AND TOC_NODEID = %s
+                RETURNING TOC_NODEID;
+                """, (new_content, new_end, docid, toc_nodeid)
+            )
+            if next_id is not None:
+                self.db.execute_query("""
+                    UPDATE toc
+                    SET START_LOC = %s
+                    WHERE DOCID = %s AND TOC_NODEID = %s
+                    RETURNING TOC_NODEID;
+                    """, (new_end + 1, docid, next_id)
+                )
+        return changed
+
+    # ──────── Sub Methods: validate nodes ────────
+    def _validate_range(self, start: int, end: int):
+        if not 1 <= start <= end:
+            raise ValueError(f"Invalid range: L{start}~L{end}. Must be 1 <= start <= end.")
+
+    def _validate_limits(self, content: str, start: int, end: int, is_leaf: bool):
+        kind = "Leaf" if is_leaf else "Parent"
+        min_length = self.MIN_LEAF_CONTENT_LENGTH if is_leaf else self.MIN_PARENT_CONTENT_LENGTH
+        max_length = self.MAX_LEAF_CONTENT_LENGTH if is_leaf else self.MAX_PARENT_CONTENT_LENGTH
+        max_lines  = self.MAX_LEAF_LOC_LENGTH     if is_leaf else self.MAX_PARENT_LOC_LENGTH
+
+        if not min_length <= len(content) <= max_length:
+            raise ValueError(f"{kind} content length is {len(content)}. Must be in [{min_length}, {max_length}].")
+        if end - start + 1 > max_lines:
+            raise ValueError(f"{kind} L{start}~L{end} spans {end - start + 1} lines. Max is {max_lines}.")
 
     # TODO : chunking agent의 실수를 대비헤 불연속 탐지/수정 기능도 제공해야 할지도.
 
@@ -351,14 +455,14 @@ class TaskTable(BaseTable):
                 STATUS          task_status NOT NULL DEFAULT 'PENDING'
             );"""
 
-    def insert_task(self, primary_goal: str) -> int | None:
-        records = self.db.execute_query(f"""
+    def insert_task(self, primary_goal: str) -> int:
+        result = self.db.execute_query(f"""
             INSERT INTO task(PRIMARY_GOAL)
             VALUES (%s)
             RETURNING TID;
         """, (primary_goal,))  
 
-        return records[0][0] # return new task's ID (TID)
+        return result[0][0] # return new task's ID (TID)
 
     def delete_task(self, tid: int):
         self.db.execute_query(
@@ -473,7 +577,7 @@ class IntentTable(BaseTable):
                 FOREIGN KEY (TID, GID) REFERENCES goal(TID, GID) ON DELETE CASCADE
             );"""
 
-    def insert_intent(self, tid: int, gid: int, intent: str):
+    def insert_intent(self, tid: int, gid: int|None, intent: str):
         self.db.execute_query(
             "INSERT INTO intent (TID, GID, INTENT) VALUES (%s, %s, %s);",
             (tid, gid, intent)
